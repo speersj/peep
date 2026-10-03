@@ -3,8 +3,9 @@
 // Video is decoded by ffmpeg, which streams raw NV12 frames over a pipe;
 // no video is written to disk. Frames are held in a short jitter buffer
 // and shown on their own timestamps, then converted to RGB on the GPU.
-// Press ESC or q in the window to quit, and space or click to save a
-// screenshot to ~/Pictures and copy it to the clipboard.
+// Press ESC or q in the window to quit, space or click to save a screenshot
+// to ~/Pictures and copy it to the clipboard, and t to turn object
+// detection on or off.
 package main
 
 import (
@@ -92,7 +93,7 @@ func parseArgs(args []string) (config, error) {
 		fmt.Fprintf(fs.Output(), "Usage: peep [flags] [camera]\n\n"+
 			"Displays a live RTSP camera feed; ESC or q quits. Space or a\n"+
 			"click saves a screenshot to ~/Pictures and copies it to the\n"+
-			"clipboard.\n\n"+
+			"clipboard. t turns object detection on or off for the camera.\n\n"+
 			"With a camera name, peep connects to that saved camera, asking\n"+
 			"for its password unless one is saved; an unknown name starts a\n"+
 			"wizard to add it. Without one, it lists the saved cameras.\n\n")
@@ -303,8 +304,6 @@ func run(cfg config) error {
 		// Before the window opens, as the first run downloads the model.
 		if det, err = newDetector(cfg.camera, geom, streamMatrix(info.colorSpace)); err != nil {
 			fmt.Fprintf(os.Stderr, "peep: detection is off: %v\n", err)
-		} else {
-			defer det.close()
 		}
 	}
 	quitSDL, err := initSDL()
@@ -328,6 +327,8 @@ func run(cfg config) error {
 		colorspace: streamColorspace(info.colorSpace),
 		stats:      cfg.stats,
 		det:        det,
+		camera:     cfg.camera,
+		matrix:     streamMatrix(info.colorSpace),
 	}
 	defer p.destroy()
 	if err := p.newRenderer(window); err != nil {

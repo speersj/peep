@@ -405,3 +405,24 @@ func TestRecordOpenedPassword(t *testing.T) {
 		t.Fatal("still marked as saved after passForget")
 	}
 }
+
+func TestSetCameraDetect(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	path, err := camerasPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := saveCameras(path, []savedCamera{{Name: "Porch", Host: "cam", Port: 554, Stream: "live"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := setCameraDetect("porch", true); err != nil {
+		t.Fatal(err)
+	}
+	cams, _ := loadCameras(path)
+	if !cams[0].Detect {
+		t.Fatal("detection not saved")
+	}
+	if err := setCameraDetect("garage", true); err == nil {
+		t.Fatal("unknown camera accepted")
+	}
+}

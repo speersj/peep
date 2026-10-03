@@ -247,6 +247,25 @@ func findCamera(cams []savedCamera, name string) (savedCamera, bool) {
 	return savedCamera{}, false
 }
 
+// setCameraDetect saves the detection setting of the camera called name.
+func setCameraDetect(name string, on bool) error {
+	path, err := camerasPath()
+	if err != nil {
+		return err
+	}
+	cams, err := loadCameras(path)
+	if err != nil {
+		return err
+	}
+	for i := range cams {
+		if cams[i].is(name) {
+			cams[i].Detect = on
+			return saveCameras(path, cams)
+		}
+	}
+	return fmt.Errorf("no saved camera called %q", name)
+}
+
 // recordOpened remembers cfg as the most recently opened camera, storing or
 // dropping its password in the system keyring as cfg.passChoice asks.
 func recordOpened(cfg config) error {

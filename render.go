@@ -64,6 +64,13 @@ type player struct {
 	colorspace sdl.Colorspace
 	stats      bool
 	det        *detector // nil unless detection is on
+	camera     string    // saved camera name, for toggling detection
+	matrix     yuvMatrix
+
+	detLoading chan detectorResult // a detector being started, or nil
+
+	toast      string // brief message shown over the video
+	toastUntil time.Time
 
 	renderer *sdl.Renderer
 	yuv      *sdl.Texture // the current frame as decoded, NV12
@@ -132,6 +139,9 @@ func (p *player) newTexture(format sdl.PixelFormat, access sdl.TextureAccess, w,
 }
 
 func (p *player) destroy() {
+	if p.det != nil {
+		p.det.close()
+	}
 	if p.rgb != nil {
 		p.rgb.Destroy()
 	}
@@ -186,6 +196,8 @@ func (p *player) handleEvents() (bool, error) {
 				return true, nil
 			case sdl.K_SPACE:
 				p.screenshot()
+			case sdl.K_T:
+				p.toggleDetection()
 			}
 		case sdl.EVENT_MOUSE_BUTTON_DOWN:
 			if ev.MouseButtonEvent().Button == uint8(sdl.BUTTON_LEFT) {
@@ -198,6 +210,7 @@ func (p *player) handleEvents() (bool, error) {
 
 // update uploads the frame that is due, if any.
 func (p *player) update(now time.Time) error {
+	p.pollDetector(now)
 	p.incoming = p.st.cap.take(p.incoming[:0])
 	for i, f := range p.incoming {
 		p.sched.add(f)
@@ -258,7 +271,98 @@ func (p *player) draw() error {
 			p.drawDetections(p.det.current(time.Now()))
 		}
 	}
+	p.drawToast(time.Now())
 	return r.Present()
+}
+
+// detectorResult is the outcome of starting a detector in the background.
+type detectorResult struct {
+	det *detector
+	err error
+}
+
+// toggleDetection switches detection on or off for this camera and saves
+// the choice. Starting the detector can involve downloading the model, so
+// it happens in the background; stopping waits for an analysis in progress,
+// so that happens in the background too.
+func (p *player) toggleDetection() {
+	now := time.Now()
+	switch {
+	case p.detLoading != nil:
+		return // still starting
+	case p.det != nil:
+		det := p.det
+		p.det = nil
+		go det.close()
+		p.showToast("Detection off", now)
+		p.saveDetect(false)
+	default:
+		ch := make(chan detectorResult, 1)
+		p.detLoading = ch
+		camera, geom, matrix := p.camera, p.geom, p.matrix
+		go func() {
+			det, err := newDetector(camera, geom, matrix)
+			ch <- detectorResult{det, err}
+		}()
+		p.showToast("Starting detection...", now)
+	}
+}
+
+// pollDetector picks up a detector started by toggleDetection.
+func (p *player) pollDetector(now time.Time) {
+	if p.detLoading == nil {
+		return
+	}
+	select {
+	case res := <-p.detLoading:
+		p.detLoading = nil
+		if res.err != nil {
+			fmt.Fprintf(os.Stderr, "peep: detection is off: %v\n", res.err)
+			p.showToast("Detection unavailable (see terminal)", now)
+			return
+		}
+		p.det = res.det
+		p.showToast("Detection on", now)
+		p.saveDetect(true)
+	default:
+	}
+}
+
+// saveDetect records the detection setting for the camera.
+func (p *player) saveDetect(on bool) {
+	if p.camera == "" {
+		return
+	}
+	if err := setCameraDetect(p.camera, on); err != nil {
+		fmt.Fprintf(os.Stderr, "peep: saving detection setting: %v\n", err)
+	}
+}
+
+const toastTime = 2 * time.Second
+
+func (p *player) showToast(msg string, now time.Time) {
+	p.toast, p.toastUntil = msg, now.Add(toastTime)
+	if p.detLoading != nil {
+		p.toastUntil = now.Add(time.Hour) // until the detector is ready
+	}
+}
+
+// drawToast shows the current message in the top left corner.
+func (p *player) drawToast(now time.Time) {
+	if p.toast == "" || now.After(p.toastUntil) {
+		return
+	}
+	r := p.renderer
+	scale := max(1, float32(p.geom.width)/400)
+	char := float32(sdl.DEBUG_TEXT_FONT_CHARACTER_SIZE) * scale
+	pad := char / 2
+	x, y := pad, pad
+	r.SetDrawColor(0, 0, 0, 255)
+	r.RenderFillRect(&sdl.FRect{X: x, Y: y, W: float32(len([]rune(p.toast)))*char + 2*pad, H: char + 2*pad})
+	r.SetDrawColor(255, 255, 255, 255)
+	r.SetScale(scale, scale)
+	r.DebugText((x+pad)/scale, (y+pad)/scale, p.toast)
+	r.SetScale(1, 1)
 }
 
 // drawDetections outlines and labels detected objects. Coordinates are in

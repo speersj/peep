@@ -122,6 +122,7 @@ shows which decoder is in use.
 | -------------- | --------------------------------------------------------- |
 | esc, q         | quit                                                      |
 | space, click   | save a screenshot, copy it to the clipboard and notify    |
+| t              | turn detection on or off for this camera (saved)          |
 
 Keys follow your keyboard layout, so a Caps Lock remapped to Escape (for
 example with XKB's `caps:escape`) also quits.
@@ -142,8 +143,8 @@ window rules.
 ## Detection
 
 Detection is a per-camera setting. The wizard asks whether to turn it on when
-you add or edit a camera, and `t` in the camera list toggles it for the
-selected camera. Cameras with detection on are marked "detection" in the list.
+you add or edit a camera, `t` in the camera list toggles it for the selected
+camera, and `t` in the video window turns it on or off while you watch. Cameras with detection on are marked "detection" in the list.
 
 With detection on, peep looks for people, vehicles (bicycles, cars, motorcycles,
 buses and trucks) and animals (birds, cats, dogs, horses, sheep, cows and
