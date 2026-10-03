@@ -1,46 +1,18 @@
 package main
 
 import (
-	"errors"
 	"os"
 	"os/exec"
+	"runtime"
 	"testing"
 
-	"github.com/hajimehoshi/ebiten/v2"
+	"github.com/Zyko0/go-sdl3/sdl"
 )
 
-// shaderHarness renders one NV12 frame through the game's shader into an
-// offscreen image and reads it back.
-type shaderHarness struct {
-	g    *game
-	nv12 []byte
-	dst  *ebiten.Image
-	out  []byte
-	err  error
-}
-
-func (h *shaderHarness) Update() error {
-	if h.g.packed == nil {
-		if h.err = h.g.init(); h.err != nil {
-			return h.err
-		}
-		h.g.packed.WritePixels(h.nv12)
-		h.g.hasFrame = true
-		h.dst = ebiten.NewImage(h.g.geom.width, h.g.geom.height)
-		h.g.Draw(h.dst)
-		return nil
-	}
-	h.out = make([]byte, 4*h.g.geom.width*h.g.geom.height)
-	h.dst.ReadPixels(h.out)
-	return ebiten.Termination
-}
-
-func (h *shaderHarness) Draw(*ebiten.Image)         {}
-func (h *shaderHarness) Layout(int, int) (int, int) { return 64, 64 }
-
-// TestShaderMatchesSource needs a GPU and opens a window for a moment, so it
-// only runs with PEEP_GPU_TEST=1.
-func TestShaderMatchesSource(t *testing.T) {
+// TestRenderMatchesSource needs SDL and a GPU and creates a hidden window, so
+// it only runs with PEEP_GPU_TEST=1. It checks the renderer's NV12 to RGB
+// conversion and the screenshot readback against ffmpeg's own conversion.
+func TestRenderMatchesSource(t *testing.T) {
 	if os.Getenv("PEEP_GPU_TEST") == "" {
 		t.Skip("set PEEP_GPU_TEST=1 to run (opens a window)")
 	}
@@ -65,29 +37,52 @@ func TestShaderMatchesSource(t *testing.T) {
 		t.Fatalf("nv12 frame is %d bytes; want %d", len(nv12), geom.frameLen())
 	}
 
-	hs := &shaderHarness{g: &game{geom: geom, coeffs: bt709Coeffs}, nv12: nv12}
-	ebiten.SetWindowSize(64, 64)
-	if err := ebiten.RunGame(hs); err != nil && !errors.Is(err, ebiten.Termination) {
+	// GL contexts belong to one OS thread; tests run on goroutines that
+	// otherwise move between threads.
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	quitSDL, err := initSDL()
+	if err != nil {
 		t.Fatal(err)
 	}
+	defer quitSDL()
+	window, err := sdl.CreateWindow("peep test", 64, 64, sdl.WINDOW_HIDDEN)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer window.Destroy()
+	p := &player{geom: geom, colorspace: streamColorspace("bt709")}
+	defer p.destroy()
+	if err := p.newRenderer(window); err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("video driver %s", sdl.GetCurrentVideoDriver())
+	if err := p.uploadFrame(nv12); err != nil {
+		t.Fatal(err)
+	}
+	img, err := p.readFrame()
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := img.Pix
 
 	var sum, bad int
 	for i := 0; i < len(want); i += 4 {
 		for c := range 3 {
-			d := int(hs.out[i+c]) - int(want[i+c])
+			d := int(out[i+c]) - int(want[i+c])
 			sum += abs(d)
 			if abs(d) > 12 {
 				bad++
 			}
 		}
-		if hs.out[i+3] != 255 {
-			t.Fatalf("pixel %d alpha = %d; want 255", i/4, hs.out[i+3])
+		if out[i+3] != 255 {
+			t.Fatalf("pixel %d alpha = %d; want 255", i/4, out[i+3])
 		}
 	}
 	mean := float64(sum) / float64(w*h*3)
 	t.Logf("mean abs error %.2f, %d of %d samples off by more than 12", mean, bad, w*h*3)
 	if mean > 2.5 || bad > w*h*3/200 {
-		t.Errorf("shader output differs from source: mean abs error %.2f, %d samples off by >12", mean, bad)
+		t.Errorf("rendered output differs from source: mean abs error %.2f, %d samples off by >12", mean, bad)
 	}
 }
 

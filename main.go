@@ -20,12 +20,13 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
 	"time"
 
-	"github.com/hajimehoshi/ebiten/v2"
+	"github.com/Zyko0/go-sdl3/sdl"
 	"golang.org/x/term"
 )
 
@@ -51,6 +52,10 @@ type config struct {
 	hwaccel string
 	stats   bool
 }
+
+// SDL, and the OpenGL context it renders with, must stay on one OS thread,
+// so keep the main goroutine, which runs the window, on the main thread.
+func init() { runtime.LockOSThread() }
 
 // boolFlags are the flags that take no value, which normalizeArgs must know.
 var boolFlags = map[string]bool{"h": true, "help": true, "stats": true}
@@ -326,28 +331,34 @@ func run(cfg config) error {
 	}
 	defer st.stop()
 
-	winW, winH := fitWindow(geom.width, geom.height, maxWindowW, maxWindowH)
-	ebiten.SetWindowSize(winW, winH)
-	ebiten.SetWindowTitle("peep - " + cameraFromConfig(cfg).label())
-	ebiten.SetWindowResizingMode(ebiten.WindowResizingModeEnabled)
-	// Run Update once per displayed frame so each video frame is shown on
-	// the vsync closest to when it is due.
-	ebiten.SetTPS(ebiten.SyncWithFPS)
-
-	g := &game{
-		ctx:    ctx,
-		st:     st,
-		sched:  newScheduler(cfg.buffer, fps, pool-2, st.cap.release),
-		geom:   geom,
-		coeffs: colorCoeffs(info.colorSpace),
-		stats:  cfg.stats,
-	}
-	err = ebiten.RunGame(g)
-	g.saving.Wait() // let screenshots in progress finish writing
-	if err != nil && !errors.Is(err, ebiten.Termination) {
+	quitSDL, err := initSDL()
+	if err != nil {
 		return err
 	}
-	return nil
+	defer quitSDL()
+	winW, winH := fitWindow(geom.width, geom.height, maxWindowW, maxWindowH)
+	window, err := sdl.CreateWindow("peep - "+cameraFromConfig(cfg).label(), winW, winH,
+		sdl.WINDOW_RESIZABLE|sdl.WINDOW_HIGH_PIXEL_DENSITY)
+	if err != nil {
+		return fmt.Errorf("creating window: %w", err)
+	}
+	defer window.Destroy()
+
+	p := &player{
+		ctx:        ctx,
+		st:         st,
+		sched:      newScheduler(cfg.buffer, fps, pool-2, st.cap.release),
+		geom:       geom,
+		colorspace: streamColorspace(info.colorSpace),
+		stats:      cfg.stats,
+	}
+	defer p.destroy()
+	if err := p.newRenderer(window); err != nil {
+		return err
+	}
+	err = p.loop()
+	p.saving.Wait() // let screenshots in progress finish writing
+	return err
 }
 
 // frameGeom describes the frames ffmpeg delivers.
@@ -359,12 +370,10 @@ type frameGeom struct {
 
 func (g frameGeom) frameLen() int { return g.padW * g.padH * 3 / 2 }
 
-// packedSize is the size of the RGBA image the NV12 bytes are uploaded into.
-func (g frameGeom) packedSize() (int, int) { return g.padW / 4, g.padH * 3 / 2 }
-
 // planGeom works out the output geometry and ffmpeg filter for a w x h
 // stream: downscale if too large, normalize to limited colour range (the
-// shader assumes it), and pad so NV12 rows pack into whole RGBA pixels.
+// texture is tagged as limited range), and pad to even dimensions, as NV12
+// requires, with 4-byte aligned rows.
 func planGeom(w, h, maxDim int) frameGeom {
 	cw, ch, scale := captureSize(w, h, maxDim)
 	g := frameGeom{width: cw, height: ch, padW: (cw + 3) &^ 3, padH: (ch + 1) &^ 1}

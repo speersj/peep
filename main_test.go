@@ -4,6 +4,8 @@ import (
 	"math"
 	"net/url"
 	"testing"
+
+	"github.com/Zyko0/go-sdl3/sdl"
 )
 
 func TestBuildURL(t *testing.T) {
@@ -187,24 +189,20 @@ func TestFitWindow(t *testing.T) {
 
 func TestPlanGeom(t *testing.T) {
 	tests := []struct {
-		w, h       int
-		want       frameGeom
-		wantPacked [2]int
+		w, h int
+		want frameGeom
 	}{
-		{2560, 1440, frameGeom{2560, 1440, 2560, 1440, "scale=out_range=tv"}, [2]int{640, 2160}},
-		{8192, 4320, frameGeom{4096, 2160, 4096, 2160, "scale=4096:2160:out_range=tv"}, [2]int{1024, 3240}},
-		{642, 361, frameGeom{642, 361, 644, 362, "scale=out_range=tv,pad=644:362"}, [2]int{161, 543}},
+		{2560, 1440, frameGeom{2560, 1440, 2560, 1440, "scale=out_range=tv"}},
+		{8192, 4320, frameGeom{4096, 2160, 4096, 2160, "scale=4096:2160:out_range=tv"}},
+		{642, 361, frameGeom{642, 361, 644, 362, "scale=out_range=tv,pad=644:362"}},
 	}
 	for _, tt := range tests {
 		got := planGeom(tt.w, tt.h, 4096)
 		if got != tt.want {
 			t.Errorf("planGeom(%d, %d) = %+v; want %+v", tt.w, tt.h, got, tt.want)
 		}
-		if pw, ph := got.packedSize(); pw != tt.wantPacked[0] || ph != tt.wantPacked[1] {
-			t.Errorf("planGeom(%d, %d).packedSize() = %d, %d; want %v", tt.w, tt.h, pw, ph, tt.wantPacked)
-		}
-		if pw, ph := got.packedSize(); pw*ph*4 != got.frameLen() {
-			t.Errorf("planGeom(%d, %d): packed image holds %d bytes, frame is %d", tt.w, tt.h, pw*ph*4, got.frameLen())
+		if n := got.padW * got.padH * 3 / 2; n != got.frameLen() {
+			t.Errorf("planGeom(%d, %d).frameLen() = %d; want %d", tt.w, tt.h, got.frameLen(), n)
 		}
 	}
 }
@@ -239,12 +237,12 @@ func TestParseRate(t *testing.T) {
 	}
 }
 
-func TestColorCoeffs(t *testing.T) {
-	if got := colorCoeffs("smpte170m"); &got[0] != &bt601Coeffs[0] {
+func TestStreamColorspace(t *testing.T) {
+	if got := streamColorspace("smpte170m"); got != sdl.COLORSPACE_BT601_LIMITED {
 		t.Error("smpte170m should use BT.601")
 	}
 	for _, cs := range []string{"bt709", "unknown", ""} {
-		if got := colorCoeffs(cs); &got[0] != &bt709Coeffs[0] {
+		if got := streamColorspace(cs); got != sdl.COLORSPACE_BT709_LIMITED {
 			t.Errorf("%q should use BT.709", cs)
 		}
 	}

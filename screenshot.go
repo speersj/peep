@@ -10,8 +10,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"time"
-
-	"github.com/hajimehoshi/ebiten/v2"
 )
 
 // screenshotDir is where screenshots are saved: ~/Pictures.
@@ -67,19 +65,17 @@ func writeScreenshot(img image.Image, t time.Time) (string, error) {
 // screenshot captures the current frame at the stream's resolution, then
 // saves it and copies it to the clipboard in the background, so encoding
 // does not stall playback.
-func (g *game) screenshot() {
-	if !g.hasFrame {
+func (p *player) screenshot() {
+	if !p.hasFrame {
 		return
 	}
 	t := time.Now()
-	w, h := g.geom.width, g.geom.height
-	if g.shot == nil {
-		g.shot = ebiten.NewImage(w, h)
+	img, err := p.readFrame()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "peep: capturing screenshot: %v\n", err)
+		return
 	}
-	g.drawFrame(g.shot)
-	img := image.NewRGBA(image.Rect(0, 0, w, h))
-	g.shot.ReadPixels(img.Pix) // the shader outputs opaque pixels, so no unpremultiplying
-	g.saving.Go(func() {
+	p.saving.Go(func() {
 		path, err := writeScreenshot(img, t)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "peep: saving screenshot: %v\n", err)

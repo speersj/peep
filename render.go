@@ -8,202 +8,295 @@ import (
 	"sync"
 	"time"
 
-	"github.com/hajimehoshi/ebiten/v2"
-	"github.com/hajimehoshi/ebiten/v2/inpututil"
+	"github.com/Zyko0/go-sdl3/sdl"
 )
 
-// nv12Shader converts a packed NV12 frame to RGB on the GPU. ebiten images
-// are RGBA only, so the frame's bytes are uploaded unchanged into an image
-// stride/4 pixels wide: rows [0, LumaHeight) hold luma, four samples per
-// pixel, and the LumaHeight/2 rows after them hold interleaved U,V pairs.
-const nv12Shader = `//kage:unit pixels
-
-package main
-
-// LumaHeight is the number of luma rows in the packed image.
-var LumaHeight float
-
-// Coeffs holds the YCbCr->RGB matrix terms: R+=x*V, G-=y*U+z*V, B+=w*U.
-var Coeffs vec4
-
-func channel(t vec4, i float) float {
-	if i < 0.5 {
-		return t.r
-	}
-	if i < 1.5 {
-		return t.g
-	}
-	if i < 2.5 {
-		return t.b
-	}
-	return t.a
-}
-
-func Fragment(dstPos vec4, srcPos vec2, color vec4) vec4 {
-	origin := imageSrc0Origin()
-	p := floor(dstPos.xy - imageDstOrigin())
-
-	lx := floor(p.x / 4)
-	y := channel(imageSrc0UnsafeAt(origin+vec2(lx, p.y)+0.5), p.x-lx*4)
-
-	cx := floor(p.x/2) * 2
-	ux := floor(cx / 4)
-	uv := imageSrc0UnsafeAt(origin + vec2(ux, LumaHeight+floor(p.y/2)) + 0.5)
-	u := uv.r
-	v := uv.g
-	if cx-ux*4 > 1 {
-		u = uv.b
-		v = uv.a
-	}
-
-	// Limited ("tv") range; ffmpeg is told to normalize to it.
-	yy := (y - 16.0/255.0) * (255.0 / 219.0)
-	uu := (u - 128.0/255.0) * (255.0 / 224.0)
-	vv := (v - 128.0/255.0) * (255.0 / 224.0)
-	rgb := vec3(yy+Coeffs.x*vv, yy-Coeffs.y*uu-Coeffs.z*vv, yy+Coeffs.w*uu)
-	return vec4(clamp(rgb, 0, 1), 1)
-}
-`
-
-// Matrix coefficients for the shader's Coeffs uniform.
-var (
-	bt709Coeffs = []float32{1.5748, 0.187324, 0.468124, 1.8556}
-	bt601Coeffs = []float32{1.402, 0.344136, 0.714136, 1.772}
+// SDL texture creation properties, from SDL_render.h; the binding does not
+// export them.
+const (
+	propTextureColorspace = "SDL.texture.create.colorspace"
+	propTextureFormat     = "SDL.texture.create.format"
+	propTextureAccess     = "SDL.texture.create.access"
+	propTextureWidth      = "SDL.texture.create.width"
+	propTextureHeight     = "SDL.texture.create.height"
 )
 
-// colorCoeffs picks the YCbCr matrix for ffprobe's color_space. Untagged
-// streams are assumed BT.709, which is standard for HD and larger.
-func colorCoeffs(colorSpace string) []float32 {
+// noVsyncDelay paces the loop when the renderer cannot wait for vsync.
+const noVsyncDelay = 4 * time.Millisecond
+
+// streamColorspace picks the YCbCr matrix for ffprobe's color_space. ffmpeg
+// is told to deliver limited range. Untagged streams are assumed BT.709,
+// which is standard for HD and larger.
+func streamColorspace(colorSpace string) sdl.Colorspace {
 	switch colorSpace {
 	case "smpte170m", "bt470bg", "fcc":
-		return bt601Coeffs
+		return sdl.COLORSPACE_BT601_LIMITED
 	}
-	return bt709Coeffs
+	return sdl.COLORSPACE_BT709_LIMITED
 }
 
-type game struct {
-	ctx    context.Context
-	st     *streamer
-	sched  *scheduler
-	geom   frameGeom
-	coeffs []float32
-	stats  bool
+// initSDL loads the system SDL3 library and starts its video subsystem.
+// SDL picks Wayland when it is available and falls back to X11.
+func initSDL() (func(), error) {
+	if err := sdl.LoadLibrary(sdl.Path()); err != nil {
+		return nil, fmt.Errorf("loading SDL3 (is it installed?): %w", err)
+	}
+	// Wayland compositors use the app ID for window rules and icons.
+	sdl.SetHint(sdl.HINT_APP_ID, "peep")
+	// Ctrl+C is handled through run's signal context.
+	sdl.SetHint(sdl.HINT_NO_SIGNAL_HANDLERS, "1")
+	if err := sdl.Init(sdl.INIT_VIDEO); err != nil {
+		sdl.CloseLibrary()
+		return nil, fmt.Errorf("initializing SDL: %w", err)
+	}
+	return func() {
+		sdl.Quit()
+		sdl.CloseLibrary()
+	}, nil
+}
 
-	packed   *ebiten.Image
-	shader   *ebiten.Shader
-	uniforms map[string]any
-	vertices []ebiten.Vertex
+// player shows decoded frames in a window.
+type player struct {
+	ctx        context.Context
+	st         *streamer
+	sched      *scheduler
+	geom       frameGeom
+	colorspace sdl.Colorspace
+	stats      bool
+
+	renderer *sdl.Renderer
+	yuv      *sdl.Texture // the current frame as decoded, NV12
+	rgb      *sdl.Texture // the current frame converted to RGBA, full size
+	vsync    bool         // Present waits for vsync
 	incoming []*frame
 	hasFrame bool
-
-	shot   *ebiten.Image  // offscreen target for screenshots
-	saving sync.WaitGroup // screenshots still being written
+	saving   sync.WaitGroup // screenshots still being written
 
 	statsAt    time.Time
 	statsShown uint64
 	statsRecv  uint64
+	loops      uint64
+	statsLoops uint64
 }
 
-func (g *game) init() error {
-	if max := ebiten.MaxImageSize(); max > 0 && (g.geom.width > max || g.geom.height > max) {
-		return fmt.Errorf("video %dx%d exceeds the maximum texture size %d", g.geom.width, g.geom.height, max)
-	}
-	shader, err := ebiten.NewShader([]byte(nv12Shader))
+// newRenderer creates the renderer for a window and the textures for
+// frames of geom: video is letterboxed into the window at any size.
+func (p *player) newRenderer(window *sdl.Window) error {
+	r, err := window.CreateRenderer("")
 	if err != nil {
-		return fmt.Errorf("compiling shader: %w", err)
+		return fmt.Errorf("creating renderer: %w", err)
 	}
-	g.shader = shader
-	pw, ph := g.geom.packedSize()
-	g.packed = ebiten.NewImageWithOptions(image.Rect(0, 0, pw, ph), &ebiten.NewImageOptions{Unmanaged: true})
-	g.uniforms = map[string]any{"LumaHeight": float32(g.geom.padH), "Coeffs": g.coeffs}
-	w, h := float32(g.geom.width), float32(g.geom.height)
-	sw, sh := float32(pw), float32(ph)
-	g.vertices = []ebiten.Vertex{
-		{DstX: 0, DstY: 0, SrcX: 0, SrcY: 0, ColorR: 1, ColorG: 1, ColorB: 1, ColorA: 1},
-		{DstX: w, DstY: 0, SrcX: sw, SrcY: 0, ColorR: 1, ColorG: 1, ColorB: 1, ColorA: 1},
-		{DstX: 0, DstY: h, SrcX: 0, SrcY: sh, ColorR: 1, ColorG: 1, ColorB: 1, ColorA: 1},
-		{DstX: w, DstY: h, SrcX: sw, SrcY: sh, ColorR: 1, ColorG: 1, ColorB: 1, ColorA: 1},
+	p.renderer = r
+	// Show each video frame on the vsync closest to when it is due.
+	p.vsync = r.SetVSync(1) == nil
+	if err := r.SetLogicalPresentation(int32(p.geom.width), int32(p.geom.height), sdl.LOGICAL_PRESENTATION_LETTERBOX); err != nil {
+		return fmt.Errorf("setting presentation: %w", err)
 	}
+	// Frames are converted to RGB once at full size, then scaled into the
+	// window. Converting with nearest sampling repeats each chroma sample
+	// across its two pixels, matching ffmpeg's own conversion; linear
+	// sampling shifts colour edges by half a pixel. The RGB copy is scaled
+	// linearly, so a window smaller than the video does not shimmer.
+	p.yuv, err = p.newTexture(sdl.PIXELFORMAT_NV12, sdl.TEXTUREACCESS_STREAMING, p.geom.padW, p.geom.padH, p.colorspace)
+	if err != nil {
+		return fmt.Errorf("creating video texture: %w", err)
+	}
+	p.yuv.SetScaleMode(sdl.SCALEMODE_NEAREST)
+	p.rgb, err = p.newTexture(sdl.PIXELFORMAT_RGBA32, sdl.TEXTUREACCESS_TARGET, p.geom.width, p.geom.height, sdl.COLORSPACE_SRGB)
+	if err != nil {
+		return fmt.Errorf("creating frame texture: %w", err)
+	}
+	p.rgb.SetScaleMode(sdl.SCALEMODE_LINEAR)
 	return nil
 }
 
-// quitKeys close the window. ebiten reports physical keys, so a Caps Lock
-// remapped to Escape by the keyboard layout (e.g. XKB's caps:escape) arrives
-// as KeyCapsLock and does not quit.
-var quitKeys = []ebiten.Key{ebiten.KeyEscape, ebiten.KeyQ}
-
-func quitPressed() bool {
-	for _, k := range quitKeys {
-		if inpututil.IsKeyJustPressed(k) {
-			return true
+func (p *player) newTexture(format sdl.PixelFormat, access sdl.TextureAccess, w, h int, cs sdl.Colorspace) (*sdl.Texture, error) {
+	props, err := sdl.CreateProperties()
+	if err != nil {
+		return nil, err
+	}
+	defer props.Destroy()
+	for name, v := range map[string]int64{
+		propTextureFormat:     int64(format),
+		propTextureAccess:     int64(access),
+		propTextureWidth:      int64(w),
+		propTextureHeight:     int64(h),
+		propTextureColorspace: int64(cs),
+	} {
+		if err := props.SetNumberProperty(name, v); err != nil {
+			return nil, err
 		}
 	}
-	return false
+	return p.renderer.CreateTextureWithProperties(props)
 }
 
-func (g *game) Update() error {
-	if quitPressed() || g.ctx.Err() != nil {
-		return ebiten.Termination
+func (p *player) destroy() {
+	if p.rgb != nil {
+		p.rgb.Destroy()
 	}
-	if err := g.st.cap.Err(); err != nil {
-		return err
+	if p.yuv != nil {
+		p.yuv.Destroy()
 	}
-	if g.packed == nil {
-		if err := g.init(); err != nil {
+	if p.renderer != nil {
+		p.renderer.Destroy()
+	}
+}
+
+// loop runs until the window is closed, a quit key is pressed or the
+// stream fails.
+func (p *player) loop() error {
+	for {
+		quit, err := p.handleEvents()
+		if quit || err != nil || p.ctx.Err() != nil {
 			return err
 		}
+		if err := p.st.cap.Err(); err != nil {
+			return err
+		}
+		if err := p.update(time.Now()); err != nil {
+			return err
+		}
+		if err := p.draw(); err != nil {
+			return err
+		}
+		p.loops++
+		if !p.vsync {
+			time.Sleep(noVsyncDelay)
+		}
 	}
-	g.incoming = g.st.cap.take(g.incoming[:0])
-	for i, f := range g.incoming {
-		g.sched.add(f)
-		g.incoming[i] = nil
+}
+
+// handleEvents processes pending window events and reports whether to quit.
+func (p *player) handleEvents() (bool, error) {
+	var ev sdl.Event
+	for sdl.PollEvent(&ev) {
+		switch ev.Type {
+		case sdl.EVENT_QUIT, sdl.EVENT_WINDOW_CLOSE_REQUESTED:
+			return true, nil
+		case sdl.EVENT_KEY_DOWN:
+			k := ev.KeyboardEvent()
+			if k.Repeat {
+				continue
+			}
+			// Key is the keyboard layout's key, so a Caps Lock remapped
+			// to Escape (e.g. XKB's caps:escape) arrives as K_ESCAPE.
+			switch k.Key {
+			case sdl.K_ESCAPE, sdl.K_Q:
+				return true, nil
+			case sdl.K_SPACE:
+				p.screenshot()
+			}
+		case sdl.EVENT_MOUSE_BUTTON_DOWN:
+			if ev.MouseButtonEvent().Button == uint8(sdl.BUTTON_LEFT) {
+				p.screenshot()
+			}
+		}
 	}
-	now := time.Now()
-	if f := g.sched.next(now); f != nil {
-		g.packed.WritePixels(f.buf) // copies, so the buffer can be reused
-		g.st.cap.release(f.buf)
-		g.hasFrame = true
+	return false, nil
+}
+
+// update uploads the frame that is due, if any.
+func (p *player) update(now time.Time) error {
+	p.incoming = p.st.cap.take(p.incoming[:0])
+	for i, f := range p.incoming {
+		p.sched.add(f)
+		p.incoming[i] = nil
 	}
-	if inpututil.IsKeyJustPressed(ebiten.KeySpace) || inpututil.IsMouseButtonJustPressed(ebiten.MouseButtonLeft) {
-		g.screenshot()
+	if f := p.sched.next(now); f != nil {
+		err := p.uploadFrame(f.buf) // copies, so the buffer can be reused
+		p.st.cap.release(f.buf)
+		if err != nil {
+			return fmt.Errorf("uploading frame: %w", err)
+		}
+		p.hasFrame = true
 	}
-	if g.stats {
-		g.printStats(now)
+	if p.stats {
+		p.printStats(now)
 	}
 	return nil
 }
 
-func (g *game) printStats(now time.Time) {
-	if g.statsAt.IsZero() {
-		g.statsAt = now
-		return
+// uploadFrame loads an NV12 frame and converts it into p.rgb.
+func (p *player) uploadFrame(buf []byte) error {
+	pitch := p.geom.padW
+	luma := pitch * p.geom.padH
+	if err := p.yuv.UpdateNV(nil, buf[:luma], int32(pitch), buf[luma:], int32(pitch)); err != nil {
+		return err
 	}
-	elapsed := now.Sub(g.statsAt).Seconds()
-	if elapsed < 1 {
-		return
-	}
-	recv := g.st.cap.Received()
-	s := g.sched
-	fmt.Fprintf(os.Stderr, "recv %.1f fps, shown %.1f fps, cadence %.2f fps, queued %d, late %d, dropped %d, skips %d, latency %.0fms, tps %.0f\n",
-		float64(recv-g.statsRecv)/elapsed, float64(s.shown-g.statsShown)/elapsed, float64(time.Second)/float64(s.interval),
-		len(s.pending), s.late, s.dropped, s.reanchors, s.slack*1000, ebiten.ActualTPS())
-	g.statsAt, g.statsRecv, g.statsShown = now, recv, s.shown
-}
-
-func (g *game) Draw(screen *ebiten.Image) {
-	if g.hasFrame {
-		g.drawFrame(screen)
-	}
-}
-
-// drawFrame converts the current frame to RGB onto dst.
-func (g *game) drawFrame(dst *ebiten.Image) {
-	dst.DrawTrianglesShader(g.vertices, []uint16{0, 1, 2, 1, 2, 3}, g.shader, &ebiten.DrawTrianglesShaderOptions{
-		Uniforms: g.uniforms,
-		Images:   [4]*ebiten.Image{g.packed},
+	return p.withTarget(p.rgb, func() error {
+		// Crop the padding ffmpeg added.
+		src := sdl.FRect{W: float32(p.geom.width), H: float32(p.geom.height)}
+		return p.renderer.RenderTexture(p.yuv, &src, &src)
 	})
 }
 
-func (g *game) Layout(_, _ int) (int, int) {
-	return g.geom.width, g.geom.height
+// withTarget runs fn with rendering directed into tex.
+func (p *player) withTarget(tex *sdl.Texture, fn func() error) error {
+	if err := p.renderer.SetRenderTarget(tex); err != nil {
+		return fmt.Errorf("setting render target: %w", err)
+	}
+	err := fn()
+	if rerr := p.renderer.SetRenderTarget(nil); err == nil && rerr != nil {
+		err = fmt.Errorf("restoring render target: %w", rerr)
+	}
+	return err
+}
+
+func (p *player) draw() error {
+	r := p.renderer
+	r.SetDrawColor(0, 0, 0, 255)
+	r.Clear()
+	if p.hasFrame {
+		if err := r.RenderTexture(p.rgb, nil, nil); err != nil {
+			return fmt.Errorf("drawing frame: %w", err)
+		}
+	}
+	return r.Present()
+}
+
+// readFrame reads the current frame back from the GPU as RGBA, at the
+// stream's resolution.
+func (p *player) readFrame() (*image.RGBA, error) {
+	var surf *sdl.Surface
+	err := p.withTarget(p.rgb, func() error {
+		var err error
+		surf, err = p.renderer.ReadPixels(nil)
+		return err
+	})
+	if err != nil {
+		return nil, fmt.Errorf("reading pixels: %w", err)
+	}
+	defer surf.Destroy()
+	if surf.Format != sdl.PIXELFORMAT_RGBA32 {
+		conv, err := surf.Convert(sdl.PIXELFORMAT_RGBA32)
+		if err != nil {
+			return nil, err
+		}
+		defer conv.Destroy()
+		surf = conv
+	}
+	w, h := p.geom.width, p.geom.height
+	img := image.NewRGBA(image.Rect(0, 0, w, h))
+	pix, pitch := surf.Pixels(), int(surf.Pitch)
+	for y := range h {
+		copy(img.Pix[y*img.Stride:(y+1)*img.Stride], pix[y*pitch:])
+	}
+	return img, nil
+}
+
+func (p *player) printStats(now time.Time) {
+	if p.statsAt.IsZero() {
+		p.statsAt = now
+		return
+	}
+	elapsed := now.Sub(p.statsAt).Seconds()
+	if elapsed < 1 {
+		return
+	}
+	recv := p.st.cap.Received()
+	s := p.sched
+	fmt.Fprintf(os.Stderr, "recv %.1f fps, shown %.1f fps, cadence %.2f fps, queued %d, late %d, dropped %d, skips %d, latency %.0fms, loop %.0f/s\n",
+		float64(recv-p.statsRecv)/elapsed, float64(s.shown-p.statsShown)/elapsed, float64(time.Second)/float64(s.interval),
+		len(s.pending), s.late, s.dropped, s.reanchors, s.slack*1000, float64(p.loops-p.statsLoops)/elapsed)
+	p.statsAt, p.statsRecv, p.statsShown, p.statsLoops = now, recv, s.shown, p.loops
 }
