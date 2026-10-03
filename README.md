@@ -121,7 +121,7 @@ shows which decoder is in use.
 | Input          | Action                                                    |
 | -------------- | --------------------------------------------------------- |
 | esc, q         | quit                                                      |
-| space, click   | save a screenshot, copy it to the clipboard and notify    |
+| space          | save a screenshot, copy it to the clipboard and notify    |
 | t              | turn detection on or off for this camera (saved)          |
 
 Keys follow your keyboard layout, so a Caps Lock remapped to Escape (for
@@ -154,7 +154,10 @@ label and confidence. Other objects, such as furniture, are ignored.
 When something appears, peep shows a notification such as "Person detected",
 naming the camera, the time and the confidence. The notification has a
 thumbnail, and clicking it opens the full frame with the detections outlined.
-The frames are saved in `~/.cache/peep/detections` and deleted after a week.
+The frames are saved in `~/.cache/peep/detections`. While peep runs, it
+checks that folder at startup and every 10 minutes. It deletes frames older
+than a week, and if the folder still holds more than 1 GB, it deletes the
+oldest 10% of frames until it is under that limit.
 
 To avoid repeated or false alerts:
 

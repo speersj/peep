@@ -199,10 +199,6 @@ func (p *player) handleEvents() (bool, error) {
 			case sdl.K_T:
 				p.toggleDetection()
 			}
-		case sdl.EVENT_MOUSE_BUTTON_DOWN:
-			if ev.MouseButtonEvent().Button == uint8(sdl.BUTTON_LEFT) {
-				p.screenshot()
-			}
 		}
 	}
 	return false, nil

@@ -1,8 +1,10 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -133,5 +135,54 @@ func TestDetectorOnFrame(t *testing.T) {
 	}
 	if want := os.Getenv("PEEP_DETECT_EXPECT"); want != "" && !found {
 		t.Errorf("no %s detected", want)
+	}
+}
+
+func TestPruneEvents(t *testing.T) {
+	dir := t.TempDir()
+	now := time.Now()
+	write := func(name string, size int, age time.Duration) {
+		t.Helper()
+		path := filepath.Join(dir, name)
+		if err := os.WriteFile(path, make([]byte, size), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(path, now.Add(-age), now.Add(-age)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// 20 files of 100 bytes, f00 the oldest, plus one past the age limit.
+	for i := range 20 {
+		write(fmt.Sprintf("f%02d.jpg", i), 100, time.Duration(20-i)*time.Hour)
+	}
+	write("ancient.jpg", 100, 8*24*time.Hour)
+
+	// Under the size limit: only the old file goes.
+	if n, err := pruneEvents(dir, 7*24*time.Hour, 5000, now); err != nil || n != 1 {
+		t.Fatalf("pruneEvents = %d, %v; want 1 aged out", n, err)
+	}
+	// 2000 bytes over a 1900 limit: the oldest 10% (2 files) go.
+	if n, err := pruneEvents(dir, 7*24*time.Hour, 1900, now); err != nil || n != 2 {
+		t.Fatalf("pruneEvents = %d, %v; want 2", n, err)
+	}
+	for _, gone := range []string{"f00.jpg", "f01.jpg", "ancient.jpg"} {
+		if _, err := os.Stat(filepath.Join(dir, gone)); err == nil {
+			t.Errorf("%s still exists", gone)
+		}
+	}
+	// Far over the limit: rounds of 10% repeat until under it.
+	if _, err := pruneEvents(dir, 7*24*time.Hour, 500, now); err != nil {
+		t.Fatal(err)
+	}
+	entries, _ := os.ReadDir(dir)
+	if len(entries) > 5 || len(entries) == 0 {
+		t.Fatalf("%d files left; want at most 5 (500 bytes) and the newest kept", len(entries))
+	}
+	if _, err := os.Stat(filepath.Join(dir, "f19.jpg")); err != nil {
+		t.Error("newest file was deleted")
+	}
+	// A missing directory is fine.
+	if _, err := pruneEvents(filepath.Join(dir, "nope"), time.Hour, 1, now); err != nil {
+		t.Errorf("missing dir: %v", err)
 	}
 }

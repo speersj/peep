@@ -3,9 +3,9 @@
 // Video is decoded by ffmpeg, which streams raw NV12 frames over a pipe;
 // no video is written to disk. Frames are held in a short jitter buffer
 // and shown on their own timestamps, then converted to RGB on the GPU.
-// Press ESC or q in the window to quit, space or click to save a screenshot
-// to ~/Pictures and copy it to the clipboard, and t to turn object
-// detection on or off.
+// Press ESC or q in the window to quit, space to save a screenshot to
+// ~/Pictures and copy it to the clipboard, and t to turn object detection
+// on or off.
 package main
 
 import (
@@ -91,9 +91,9 @@ func parseArgs(args []string) (config, error) {
 	fs.BoolVar(&cfg.stats, "stats", false, "print playback statistics to stderr once a second")
 	fs.Usage = func() {
 		fmt.Fprintf(fs.Output(), "Usage: peep [flags] [camera]\n\n"+
-			"Displays a live RTSP camera feed; ESC or q quits. Space or a\n"+
-			"click saves a screenshot to ~/Pictures and copies it to the\n"+
-			"clipboard. t turns object detection on or off for the camera.\n\n"+
+			"Displays a live RTSP camera feed; ESC or q quits. Space saves a\n"+
+			"screenshot to ~/Pictures and copies it to the clipboard. t turns\n"+
+			"object detection on or off for the camera.\n\n"+
 			"With a camera name, peep connects to that saved camera, asking\n"+
 			"for its password unless one is saved; an unknown name starts a\n"+
 			"wizard to add it. Without one, it lists the saved cameras.\n\n")
@@ -295,6 +295,7 @@ func run(cfg config) error {
 		return err
 	}
 	defer st.stop()
+	go pruneEventsPeriodically(ctx) // keeps saved detection images in check
 	if cfg.stats {
 		fmt.Fprintf(os.Stderr, "peep: decoding with %s\n", dec.name)
 	}

@@ -10,6 +10,7 @@ import (
 	"image/color"
 	"image/jpeg"
 	"io"
+	"io/fs"
 	"math"
 	"net/http"
 	"os"
@@ -43,7 +44,14 @@ const (
 	confirmRuns   = 2                // runs in a row an object must be seen before notifying
 	goneAfter     = 30 * time.Second // absence after which a reappearance is new
 	boxesShownFor = time.Second      // boxes stay up this long after the last run
+
+	// Saved detection images are deleted after keepEventsFor, and the
+	// oldest pruneFraction of them while they total more than maxEventBytes.
+	// Pruning runs at startup and every pruneEvery.
 	keepEventsFor = 7 * 24 * time.Hour
+	maxEventBytes = 1 << 30
+	pruneFraction = 0.1
+	pruneEvery    = 10 * time.Minute
 )
 
 // cocoNames are the model's classes, in output order.
@@ -159,7 +167,6 @@ func newDetector(camera string, geom frameGeom, matrix yuvMatrix) (*detector, er
 	d.free = make(chan []byte, 1)
 	d.free <- make([]byte, geom.frameLen())
 	d.done = make(chan struct{})
-	pruneEvents()
 	go d.run()
 	return d, nil
 }
@@ -502,18 +509,74 @@ func eventsDir() (string, error) {
 	return filepath.Join(dir, "peep", "detections"), nil
 }
 
-// pruneEvents deletes detection images older than keepEventsFor.
-func pruneEvents() {
+// pruneEventsPeriodically prunes the detection images now and then every
+// pruneEvery until ctx is done.
+func pruneEventsPeriodically(ctx context.Context) {
 	dir, err := eventsDir()
 	if err != nil {
 		return
 	}
-	entries, _ := os.ReadDir(dir)
-	for _, e := range entries {
-		if info, err := e.Info(); err == nil && time.Since(info.ModTime()) > keepEventsFor {
-			os.Remove(filepath.Join(dir, e.Name()))
+	tick := time.NewTicker(pruneEvery)
+	defer tick.Stop()
+	for {
+		if _, err := pruneEvents(dir, keepEventsFor, maxEventBytes, time.Now()); err != nil {
+			fmt.Fprintf(os.Stderr, "peep: pruning %s: %v\n", dir, err)
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-tick.C:
 		}
 	}
+}
+
+// pruneEvents deletes files in dir older than maxAge, then, while the rest
+// total more than maxBytes, the oldest pruneFraction of them (at least one).
+// It returns how many files it deleted. A missing dir is not an error.
+func pruneEvents(dir string, maxAge time.Duration, maxBytes int64, now time.Time) (int, error) {
+	entries, err := os.ReadDir(dir)
+	if errors.Is(err, fs.ErrNotExist) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	type file struct {
+		path string
+		size int64
+		mod  time.Time
+	}
+	var files []file
+	var total int64
+	deleted := 0
+	for _, e := range entries {
+		info, err := e.Info()
+		if err != nil || !info.Mode().IsRegular() {
+			continue
+		}
+		f := file{filepath.Join(dir, e.Name()), info.Size(), info.ModTime()}
+		if now.Sub(f.mod) > maxAge {
+			if os.Remove(f.path) == nil {
+				deleted++
+			}
+			continue
+		}
+		files = append(files, f)
+		total += f.size
+	}
+	slices.SortFunc(files, func(a, b file) int { return a.mod.Compare(b.mod) })
+	for total > maxBytes && len(files) > 0 {
+		n := max(1, int(float64(len(files))*pruneFraction))
+		for _, f := range files[:n] {
+			if err := os.Remove(f.path); err != nil && !errors.Is(err, fs.ErrNotExist) {
+				return deleted, err
+			}
+			deleted++
+			total -= f.size
+		}
+		files = files[n:]
+	}
+	return deleted, nil
 }
 
 // ensureModel returns the path to the detection model, downloading and
