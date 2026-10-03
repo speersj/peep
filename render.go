@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"image"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/hajimehoshi/ebiten/v2"
@@ -95,6 +96,9 @@ type game struct {
 	incoming []*frame
 	hasFrame bool
 
+	shot   *ebiten.Image  // offscreen target for screenshots
+	saving sync.WaitGroup // screenshots still being written
+
 	statsAt    time.Time
 	statsShown uint64
 	statsRecv  uint64
@@ -146,6 +150,9 @@ func (g *game) Update() error {
 		g.st.cap.release(f.buf)
 		g.hasFrame = true
 	}
+	if inpututil.IsKeyJustPressed(ebiten.KeySpace) || inpututil.IsMouseButtonJustPressed(ebiten.MouseButtonLeft) {
+		g.screenshot()
+	}
 	if g.stats {
 		g.printStats(now)
 	}
@@ -170,10 +177,14 @@ func (g *game) printStats(now time.Time) {
 }
 
 func (g *game) Draw(screen *ebiten.Image) {
-	if !g.hasFrame {
-		return
+	if g.hasFrame {
+		g.drawFrame(screen)
 	}
-	screen.DrawTrianglesShader(g.vertices, []uint16{0, 1, 2, 1, 2, 3}, g.shader, &ebiten.DrawTrianglesShaderOptions{
+}
+
+// drawFrame converts the current frame to RGB onto dst.
+func (g *game) drawFrame(dst *ebiten.Image) {
+	dst.DrawTrianglesShader(g.vertices, []uint16{0, 1, 2, 1, 2, 3}, g.shader, &ebiten.DrawTrianglesShaderOptions{
 		Uniforms: g.uniforms,
 		Images:   [4]*ebiten.Image{g.packed},
 	})

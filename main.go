@@ -1,9 +1,10 @@
 // Command peep displays a live RTSP camera feed in a window.
 
 // Video is decoded by ffmpeg, which streams raw NV12 frames over a pipe;
-// nothing is ever written to disk. Frames are held in a short jitter buffer
+// no video is written to disk. Frames are held in a short jitter buffer
 // and shown on their own timestamps, then converted to RGB on the GPU.
-// Press ESC in the window to quit.
+// Press ESC in the window to quit, and space or click to save a screenshot
+// to ~/Pictures.
 package main
 
 import (
@@ -90,7 +91,8 @@ func parseArgs(args []string) (config, error) {
 	fs.BoolVar(&cfg.stats, "stats", false, "print playback statistics to stderr once a second")
 	fs.Usage = func() {
 		fmt.Fprintf(fs.Output(), "Usage: peep [flags] [<host>[:port]]\n\n"+
-			"Displays a live RTSP feed; ESC quits. The port defaults to %d.\n"+
+			"Displays a live RTSP feed; ESC quits. Space or a click saves a\n"+
+			"screenshot to ~/Pictures. The port defaults to %d.\n"+
 			"Without a host, an interactive picker offers previously opened\n"+
 			"cameras or walks through entering a new one.\n\n", defaultPort)
 		fs.PrintDefaults()
@@ -339,7 +341,9 @@ func run(cfg config) error {
 		coeffs: colorCoeffs(info.colorSpace),
 		stats:  cfg.stats,
 	}
-	if err := ebiten.RunGame(g); err != nil && !errors.Is(err, ebiten.Termination) {
+	err = ebiten.RunGame(g)
+	g.saving.Wait() // let screenshots in progress finish writing
+	if err != nil && !errors.Is(err, ebiten.Termination) {
 		return err
 	}
 	return nil
