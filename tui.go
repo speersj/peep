@@ -24,10 +24,19 @@ var (
 type screen int
 
 const (
-	screenList     screen = iota // pick a saved camera or start the wizard
-	screenWizard                 // enter connection details step by step
-	screenPassword               // password for a saved camera
+	screenList      screen = iota // pick a saved camera or start the wizard
+	screenWizard                  // enter connection details step by step
+	screenPassword                // password for a saved camera
+	screenRemember                // offer to keep the password in the keyring
+	screenUnlocking               // reading a saved password from the keyring
 )
+
+// storedPassMsg carries the result of reading a password from the keyring.
+type storedPassMsg struct {
+	cam  savedCamera
+	pass string
+	err  error
+}
 
 // Wizard steps, in order.
 const (
@@ -51,9 +60,12 @@ type pickerModel struct {
 	inputs [numSteps]textinput.Model
 	picked savedCamera // camera awaiting a password on screenPassword
 
-	err      string
-	result   *config
-	modified bool // cams changed (a camera was forgotten)
+	pending      config // connection awaiting an answer on screenRemember
+	rememberFrom screen // where esc on screenRemember returns to
+
+	err       string
+	result    *config
+	forgotten []savedCamera // cameras removed from the list
 }
 
 func newPicker(base config, cams []savedCamera) pickerModel {
@@ -85,6 +97,9 @@ func newPicker(base config, cams []savedCamera) pickerModel {
 func (m pickerModel) Init() tea.Cmd { return textinput.Blink }
 
 func (m pickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if res, ok := msg.(storedPassMsg); ok {
+		return m.gotStoredPassword(res)
+	}
 	if key, ok := msg.(tea.KeyPressMsg); ok {
 		if key.String() == "ctrl+c" {
 			return m, tea.Quit
@@ -92,6 +107,10 @@ func (m pickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch m.screen {
 		case screenList:
 			return m.updateList(key)
+		case screenRemember:
+			return m.rememberKey(key)
+		case screenUnlocking:
+			return m, nil
 		case screenWizard:
 			if mm, cmd, handled := m.wizardKey(key); handled {
 				return mm, cmd
@@ -128,8 +147,8 @@ func (m pickerModel) updateList(key tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, tea.Quit
 	case "d", "delete", "x":
 		if m.cursor < len(m.cams) {
+			m.forgotten = append(m.forgotten, m.cams[m.cursor])
 			m.cams = forgetCamera(m.cams, m.cams[m.cursor])
-			m.modified = true
 			m.cursor = min(m.cursor, len(m.cams))
 		}
 	case "e":
@@ -145,11 +164,68 @@ func (m pickerModel) updateList(key tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			return m.finish(cam.config(m.base))
 		}
 		m.picked = cam
-		m.screen = screenPassword
-		m.inputs[stepPass].SetValue("")
-		return m, m.inputs[stepPass].Focus()
+		if cam.RememberPassword {
+			m.screen = screenUnlocking
+			return m, func() tea.Msg {
+				pass, err := cam.storedPassword()
+				return storedPassMsg{cam, pass, err}
+			}
+		}
+		return m, m.askPassword()
 	}
 	return m, nil
+}
+
+// askPassword shows the password prompt for m.picked.
+func (m *pickerModel) askPassword() tea.Cmd {
+	m.screen = screenPassword
+	m.inputs[stepPass].SetValue("")
+	return m.inputs[stepPass].Focus()
+}
+
+// gotStoredPassword connects with a password read from the keyring, or
+// falls back to asking for it.
+func (m pickerModel) gotStoredPassword(res storedPassMsg) (tea.Model, tea.Cmd) {
+	if m.screen != screenUnlocking || !res.cam.sameAs(m.picked) {
+		return m, nil
+	}
+	if res.err != nil {
+		m.err = fmt.Sprintf("couldn't read the saved password: %v", res.err)
+		return m, m.askPassword()
+	}
+	cfg := res.cam.config(m.base)
+	cfg.pass = res.pass
+	return m.finish(cfg)
+}
+
+// offerRemember asks whether to keep cfg's password, or connects straight
+// away when there is no password to keep.
+func (m pickerModel) offerRemember(cfg config) (tea.Model, tea.Cmd) {
+	if cfg.user == "" || cfg.pass == "" {
+		cfg.passChoice = passForget
+		return m.finish(cfg)
+	}
+	m.inputs[stepPass].Blur()
+	m.pending = cfg
+	m.rememberFrom = m.screen
+	m.screen = screenRemember
+	return m, nil
+}
+
+func (m pickerModel) rememberKey(key tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	cfg := m.pending
+	switch key.String() {
+	case "y", "Y":
+		cfg.passChoice = passRemember
+	case "n", "N", "enter":
+		cfg.passChoice = passForget
+	case "esc":
+		m.screen = m.rememberFrom
+		return m, m.inputs[stepPass].Focus()
+	default:
+		return m, nil
+	}
+	return m.finish(cfg)
 }
 
 // startWizard opens the wizard, prefilled from cam when editing one.
@@ -187,7 +263,7 @@ func (m pickerModel) wizardKey(key tea.KeyPressMsg) (tea.Model, tea.Cmd, bool) {
 				m.err = err.Error()
 				return m, nil, true
 			}
-			mm, cmd := m.finish(cfg)
+			mm, cmd := m.offerRemember(cfg)
 			return mm, cmd, true
 		}
 		return m, m.focusStep(next), true
@@ -248,9 +324,10 @@ func (m pickerModel) passwordKey(key tea.KeyPressMsg) (tea.Model, tea.Cmd, bool)
 	case "enter":
 		cfg := m.picked.config(m.base)
 		cfg.pass = m.inputs[stepPass].Value()
-		mm, cmd := m.finish(cfg)
+		mm, cmd := m.offerRemember(cfg)
 		return mm, cmd, true
 	case "esc":
+		m.err = ""
 		m.inputs[stepPass].Blur()
 		m.screen = screenList
 		return m, nil, true
@@ -270,14 +347,17 @@ func (m pickerModel) View() tea.View {
 	case screenList:
 		b.WriteString(labelStyle.Render("Choose a camera") + "\n\n")
 		for i := 0; i <= len(m.cams); i++ {
-			text := "+ New camera…"
+			text, note := "+ New camera…", ""
 			if i < len(m.cams) {
 				text = m.cams[i].label()
+				if m.cams[i].RememberPassword {
+					note = dimStyle.Render("  · password saved")
+				}
 			}
 			if i == m.cursor {
-				b.WriteString(selStyle.Render("› "+text) + "\n")
+				b.WriteString(selStyle.Render("› "+text) + note + "\n")
 			} else {
-				b.WriteString("  " + text + "\n")
+				b.WriteString("  " + text + note + "\n")
 			}
 		}
 		b.WriteString("\n" + dimStyle.Render("↑/↓ move · enter connect · e edit · d forget · q quit"))
@@ -299,6 +379,12 @@ func (m pickerModel) View() tea.View {
 		b.WriteString(labelStyle.Render("Password for "+m.picked.label()) + "\n")
 		b.WriteString(m.inputs[stepPass].View() + "\n")
 		b.WriteString("\n" + dimStyle.Render("enter connect · esc back · ctrl+c quit"))
+	case screenRemember:
+		b.WriteString(labelStyle.Render("Remember the password for "+cameraFromConfig(m.pending).label()+"?") + "\n")
+		b.WriteString(dimStyle.Render("It is kept in the system keyring and used to connect automatically.") + "\n")
+		b.WriteString("\n" + dimStyle.Render("y remember · n/enter don't · esc back"))
+	case screenUnlocking:
+		b.WriteString(dimStyle.Render("Reading the saved password for " + m.picked.label() + "…"))
 	}
 	if m.err != "" {
 		b.WriteString("\n\n" + errStyle.Render(m.err))
@@ -331,9 +417,17 @@ func pickCamera(base config) (config, error) {
 		return base, err
 	}
 	m := final.(pickerModel)
-	if m.modified && pathErr == nil {
+	if len(m.forgotten) > 0 && pathErr == nil {
 		if err := saveCameras(path, m.cams); err != nil {
 			fmt.Fprintf(os.Stderr, "peep: saving cameras: %v\n", err)
+		}
+		for _, c := range m.forgotten {
+			if !c.RememberPassword {
+				continue
+			}
+			if err := c.dropPassword(); err != nil {
+				fmt.Fprintf(os.Stderr, "peep: removing password from keyring: %v\n", err)
+			}
 		}
 	}
 	if m.result == nil {

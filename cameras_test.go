@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/zalando/go-keyring"
 )
 
 func TestParseHost(t *testing.T) {
@@ -111,10 +112,17 @@ func TestPickerWizard(t *testing.T) {
 		t.Fatalf("empty host accepted: step %d, err %q", m.step, m.err)
 	}
 	m = press(m, "cam:8554", "enter", "live/ch0", "enter", "admin", "enter", "s3cret", "enter")
+	if m.screen != screenRemember || m.result != nil {
+		t.Fatalf("expected remember prompt; screen %d, err %q", m.screen, m.err)
+	}
+	if back := press(m, "esc"); back.screen != screenWizard || back.step != stepPass {
+		t.Fatalf("esc from remember prompt went to screen %d step %d", back.screen, back.step)
+	}
+	m = press(m, "y")
 	if m.result == nil {
 		t.Fatalf("wizard did not finish; step %d, err %q", m.step, m.err)
 	}
-	want := config{host: "cam", port: 8554, name: "live/ch0", user: "admin", pass: "s3cret", hwaccel: "auto"}
+	want := config{host: "cam", port: 8554, name: "live/ch0", user: "admin", pass: "s3cret", hwaccel: "auto", passChoice: passRemember}
 	if *m.result != want {
 		t.Fatalf("result = %+v; want %+v", *m.result, want)
 	}
@@ -140,13 +148,13 @@ func TestPickerSaved(t *testing.T) {
 	if m.screen != screenPassword || m.result != nil {
 		t.Fatalf("expected password prompt, screen %d", m.screen)
 	}
-	m = press(m, "pw", "enter")
-	if m.result == nil || m.result.host != "locked" || m.result.port != 8554 || m.result.pass != "pw" {
-		t.Fatalf("result = %+v; want locked:8554 with password", m.result)
+	m = press(m, "pw", "enter", "n")
+	if m.result == nil || m.result.host != "locked" || m.result.port != 8554 || m.result.pass != "pw" || m.result.passChoice != passForget {
+		t.Fatalf("result = %+v; want locked:8554 with password, not remembered", m.result)
 	}
 
 	m = press(newPicker(config{}, cams), "d")
-	if !m.modified || len(m.cams) != 1 || m.cams[0].Host != "locked" {
+	if len(m.forgotten) != 1 || len(m.cams) != 1 || m.cams[0].Host != "locked" {
 		t.Fatalf("forget: cams = %+v", m.cams)
 	}
 
@@ -156,5 +164,74 @@ func TestPickerSaved(t *testing.T) {
 	}
 	if m = press(m, "esc"); m.screen != screenList {
 		t.Fatalf("esc from first wizard step did not return to the list")
+	}
+}
+
+// selectSaved presses enter on the first saved camera and runs the keyring
+// lookup it starts.
+func selectSaved(t *testing.T, cam savedCamera) pickerModel {
+	t.Helper()
+	next, cmd := newPicker(config{}, []savedCamera{cam}).Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	m := next.(pickerModel)
+	if m.screen != screenUnlocking || cmd == nil {
+		t.Fatalf("expected keyring lookup; screen %d", m.screen)
+	}
+	next, _ = m.Update(cmd())
+	return next.(pickerModel)
+}
+
+func TestPickerStoredPassword(t *testing.T) {
+	keyring.MockInit()
+	cam := savedCamera{Host: "cam", Port: 554, User: "admin", Name: "live", RememberPassword: true}
+
+	// Nothing in the keyring: fall back to asking.
+	if m := selectSaved(t, cam); m.screen != screenPassword || m.err == "" {
+		t.Fatalf("missing password: screen %d, err %q", m.screen, m.err)
+	}
+
+	if err := keyring.Set(keyringService, cam.keyringUser(), "pw"); err != nil {
+		t.Fatal(err)
+	}
+	m := selectSaved(t, cam)
+	if m.result == nil || m.result.pass != "pw" || m.result.passChoice != passKeep {
+		t.Fatalf("result = %+v; want stored password, kept", m.result)
+	}
+}
+
+func TestRecordOpenedPassword(t *testing.T) {
+	keyring.MockInit()
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	cfg := config{host: "cam", port: 554, user: "admin", pass: "pw", name: "live"}
+	user := cameraFromConfig(cfg).keyringUser()
+
+	cfg.passChoice = passRemember
+	if err := recordOpened(cfg); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := keyring.Get(keyringService, user); err != nil || got != "pw" {
+		t.Fatalf("keyring = %q, %v; want pw", got, err)
+	}
+	if pass, ok := rememberedPassword(config{host: "cam", port: 554, user: "admin", name: "live"}); !ok || pass != "pw" {
+		t.Fatalf("rememberedPassword = %q, %v; want pw", pass, ok)
+	}
+
+	// Opening it again from the command line keeps the saved password.
+	cfg.passChoice = passKeep
+	if err := recordOpened(cfg); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := rememberedPassword(cfg); !ok {
+		t.Fatal("password lost after passKeep")
+	}
+
+	cfg.passChoice = passForget
+	if err := recordOpened(cfg); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := keyring.Get(keyringService, user); err != keyring.ErrNotFound {
+		t.Fatalf("keyring after forget: %v; want ErrNotFound", err)
+	}
+	if _, ok := rememberedPassword(cfg); ok {
+		t.Fatal("rememberedPassword still found after passForget")
 	}
 }

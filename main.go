@@ -44,6 +44,8 @@ type config struct {
 	port int
 	name string
 
+	passChoice passChoice // what to do with pass in the keyring once opened
+
 	buffer  time.Duration
 	hwaccel string
 	stats   bool
@@ -79,7 +81,7 @@ func parseArgs(args []string) (config, error) {
 	fs := flag.NewFlagSet("peep", flag.ExitOnError)
 	fs.StringVar(&cfg.user, "user", "", "RTSP username (optional)")
 	fs.StringVar(&cfg.user, "u", "", "RTSP username (shorthand)")
-	fs.StringVar(&cfg.pass, "password", "", "RTSP password (prompted when -user is set and this is empty)")
+	fs.StringVar(&cfg.pass, "password", "", "RTSP password (when -user is set and this is empty, the keyring is tried, then a prompt)")
 	fs.StringVar(&cfg.pass, "pw", "", "RTSP password (shorthand)")
 	fs.StringVar(&cfg.name, "name", "", "RTSP stream name/path, e.g. \"live/ch0\"")
 	fs.StringVar(&cfg.name, "n", "", "RTSP stream name/path (shorthand)")
@@ -112,6 +114,10 @@ func parseArgs(args []string) (config, error) {
 		return cfg, errors.New("-name is required, e.g. -n live/ch0")
 	}
 	if cfg.user != "" && cfg.pass == "" {
+		if pass, ok := rememberedPassword(cfg); ok {
+			cfg.pass = pass
+			return cfg, nil
+		}
 		pass, err := promptPassword()
 		if err != nil {
 			return cfg, err
@@ -319,7 +325,7 @@ func run(cfg config) error {
 
 	winW, winH := fitWindow(geom.width, geom.height, maxWindowW, maxWindowH)
 	ebiten.SetWindowSize(winW, winH)
-	ebiten.SetWindowTitle("peep - "+cameraFromConfig(cfg).label())
+	ebiten.SetWindowTitle("peep - " + cameraFromConfig(cfg).label())
 	ebiten.SetWindowResizingMode(ebiten.WindowResizingModeEnabled)
 	// Run Update once per displayed frame so each video frame is shown on
 	// the vsync closest to when it is due.

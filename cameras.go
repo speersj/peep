@@ -11,11 +11,23 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/zalando/go-keyring"
 )
 
 const (
-	defaultPort  = 554
-	maxSavedCams = 20
+	defaultPort    = 554
+	maxSavedCams   = 20
+	keyringService = "peep"
+)
+
+// passChoice says what to do with a camera's password once it opens.
+type passChoice int
+
+const (
+	passKeep     passChoice = iota // leave any remembered password alone
+	passRemember                   // store it in the system keyring
+	passForget                     // remove it from the system keyring
 )
 
 // parseHost splits "host", "host:port", "[v6addr]:port" or a bare IPv6
@@ -46,14 +58,16 @@ func parseHost(s string) (string, int, error) {
 	return host, port, nil
 }
 
-// savedCamera is a camera that was opened successfully. Passwords are never
-// stored; they are asked for again when the camera is picked.
+// savedCamera is a camera that was opened successfully. Passwords never go
+// in the cameras file: when RememberPassword is set, the password is in the
+// system keyring under keyringService and keyringUser.
 type savedCamera struct {
-	Host     string    `json:"host"`
-	Port     int       `json:"port"`
-	User     string    `json:"user,omitempty"`
-	Name     string    `json:"name"`
-	LastUsed time.Time `json:"last_used"`
+	Host             string    `json:"host"`
+	Port             int       `json:"port"`
+	User             string    `json:"user,omitempty"`
+	Name             string    `json:"name"`
+	RememberPassword bool      `json:"remember_password,omitempty"`
+	LastUsed         time.Time `json:"last_used"`
 }
 
 func (c savedCamera) sameAs(o savedCamera) bool {
@@ -76,6 +90,23 @@ func (c savedCamera) label() string {
 		addr = c.User + "@" + addr
 	}
 	return addr + "/" + strings.TrimPrefix(c.Name, "/")
+}
+
+// keyringUser is the account name the camera's password is stored under.
+func (c savedCamera) keyringUser() string { return c.label() }
+
+// storedPassword fetches the camera's password from the system keyring.
+func (c savedCamera) storedPassword() (string, error) {
+	return keyring.Get(keyringService, c.keyringUser())
+}
+
+// dropPassword removes the camera's password from the system keyring.
+func (c savedCamera) dropPassword() error {
+	err := keyring.Delete(keyringService, c.keyringUser())
+	if errors.Is(err, keyring.ErrNotFound) {
+		return nil
+	}
+	return err
 }
 
 func (c savedCamera) config(base config) config {
@@ -160,7 +191,18 @@ func forgetCamera(cams []savedCamera, cam savedCamera) []savedCamera {
 	return out
 }
 
-// recordOpened remembers cfg as the most recently opened camera.
+// findCamera returns the saved entry matching cam, if any.
+func findCamera(cams []savedCamera, cam savedCamera) (savedCamera, bool) {
+	for _, c := range cams {
+		if c.sameAs(cam) {
+			return c, true
+		}
+	}
+	return savedCamera{}, false
+}
+
+// recordOpened remembers cfg as the most recently opened camera, storing or
+// dropping its password in the system keyring as cfg.passChoice asks.
 func recordOpened(cfg config) error {
 	path, err := camerasPath()
 	if err != nil {
@@ -172,5 +214,42 @@ func recordOpened(cfg config) error {
 	}
 	cam := cameraFromConfig(cfg)
 	cam.LastUsed = time.Now()
-	return saveCameras(path, rememberCamera(cams, cam))
+	if prev, ok := findCamera(cams, cam); ok {
+		cam.RememberPassword = prev.RememberPassword
+	}
+	var keyErr error
+	switch {
+	case cfg.passChoice == passRemember && cfg.user != "":
+		if keyErr = keyring.Set(keyringService, cam.keyringUser(), cfg.pass); keyErr == nil {
+			cam.RememberPassword = true
+		} else {
+			keyErr = fmt.Errorf("saving password to keyring: %w", keyErr)
+		}
+	case cfg.passChoice == passForget && cam.RememberPassword:
+		if keyErr = cam.dropPassword(); keyErr == nil {
+			cam.RememberPassword = false
+		} else {
+			keyErr = fmt.Errorf("removing password from keyring: %w", keyErr)
+		}
+	}
+	return errors.Join(keyErr, saveCameras(path, rememberCamera(cams, cam)))
+}
+
+// rememberedPassword looks up the keyring password for cfg's camera, if it
+// was saved with one.
+func rememberedPassword(cfg config) (string, bool) {
+	path, err := camerasPath()
+	if err != nil {
+		return "", false
+	}
+	cams, err := loadCameras(path)
+	if err != nil {
+		return "", false
+	}
+	cam, ok := findCamera(cams, cameraFromConfig(cfg))
+	if !ok || !cam.RememberPassword {
+		return "", false
+	}
+	pass, err := cam.storedPassword()
+	return pass, err == nil
 }
