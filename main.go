@@ -58,6 +58,16 @@ func main() {
 		fmt.Fprintf(os.Stderr, "peep: %v\nrun 'peep -h' for usage\n", err)
 		os.Exit(2)
 	}
+	if cfg.host == "" {
+		cfg, err = pickCamera(cfg)
+		if errors.Is(err, errCanceled) {
+			return
+		}
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "peep: %v\n", err)
+			os.Exit(1)
+		}
+	}
 	if err := run(cfg); err != nil {
 		fmt.Fprintf(os.Stderr, "peep: %v\n", err)
 		os.Exit(1)
@@ -71,31 +81,35 @@ func parseArgs(args []string) (config, error) {
 	fs.StringVar(&cfg.user, "u", "", "RTSP username (shorthand)")
 	fs.StringVar(&cfg.pass, "password", "", "RTSP password (prompted when -user is set and this is empty)")
 	fs.StringVar(&cfg.pass, "pw", "", "RTSP password (shorthand)")
-	fs.IntVar(&cfg.port, "port", 554, "RTSP port")
-	fs.IntVar(&cfg.port, "p", 554, "RTSP port (shorthand)")
 	fs.StringVar(&cfg.name, "name", "", "RTSP stream name/path, e.g. \"live/ch0\"")
 	fs.StringVar(&cfg.name, "n", "", "RTSP stream name/path (shorthand)")
 	fs.DurationVar(&cfg.buffer, "buffer", 250*time.Millisecond, "playback delay used to smooth out network jitter (0 for lowest latency)")
 	fs.StringVar(&cfg.hwaccel, "hwaccel", "auto", "ffmpeg hardware decoding method, e.g. auto, vaapi, cuda; \"none\" to disable")
 	fs.BoolVar(&cfg.stats, "stats", false, "print playback statistics to stderr once a second")
 	fs.Usage = func() {
-		fmt.Fprintf(fs.Output(), "Usage: peep [flags] <host>\n\nDisplays a live RTSP feed; ESC quits.\n\n")
+		fmt.Fprintf(fs.Output(), "Usage: peep [flags] [<host>[:port]]\n\n"+
+			"Displays a live RTSP feed; ESC quits. The port defaults to %d.\n"+
+			"Without a host, an interactive picker offers previously opened\n"+
+			"cameras or walks through entering a new one.\n\n", defaultPort)
 		fs.PrintDefaults()
 	}
 	fs.Parse(normalizeArgs(args)) // ExitOnError: exits on bad flags or -h
 
-	if fs.NArg() != 1 {
-		return cfg, errors.New("exactly one <host> argument is required")
-	}
-	cfg.host = fs.Arg(0)
-	if cfg.name == "" {
-		return cfg, errors.New("-name is required, e.g. -n live/ch0")
-	}
-	if cfg.port < 1 || cfg.port > 65535 {
-		return cfg, fmt.Errorf("-port out of range: %d", cfg.port)
-	}
 	if cfg.buffer < 0 || cfg.buffer > 10*time.Second {
 		return cfg, fmt.Errorf("-buffer out of range: %v", cfg.buffer)
+	}
+	if fs.NArg() > 1 {
+		return cfg, errors.New("at most one <host> argument is allowed")
+	}
+	if fs.NArg() == 0 {
+		return cfg, nil // no host: the interactive picker fills in the rest
+	}
+	var err error
+	if cfg.host, cfg.port, err = parseHost(fs.Arg(0)); err != nil {
+		return cfg, err
+	}
+	if cfg.name == "" {
+		return cfg, errors.New("-name is required, e.g. -n live/ch0")
 	}
 	if cfg.user != "" && cfg.pass == "" {
 		pass, err := promptPassword()
@@ -273,6 +287,9 @@ func run(cfg config) error {
 	if err != nil {
 		return err
 	}
+	if err := recordOpened(cfg); err != nil {
+		fmt.Fprintf(os.Stderr, "peep: remembering camera: %v\n", err)
+	}
 	fps := info.fps
 	if fps == 0 {
 		fps = defaultFPS
@@ -302,7 +319,7 @@ func run(cfg config) error {
 
 	winW, winH := fitWindow(geom.width, geom.height, maxWindowW, maxWindowH)
 	ebiten.SetWindowSize(winW, winH)
-	ebiten.SetWindowTitle(fmt.Sprintf("peep - %s:%d/%s", cfg.host, cfg.port, strings.TrimPrefix(cfg.name, "/")))
+	ebiten.SetWindowTitle("peep - "+cameraFromConfig(cfg).label())
 	ebiten.SetWindowResizingMode(ebiten.WindowResizingModeEnabled)
 	// Run Update once per displayed frame so each video frame is shown on
 	// the vsync closest to when it is due.

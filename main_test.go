@@ -103,8 +103,8 @@ func TestNormalizeArgs(t *testing.T) {
 			want: []string{"-u", "admin", "host"},
 		},
 		{
-			in:   []string{"-p=8554", "host", "-n", "live"},
-			want: []string{"-p=8554", "-n", "live", "host"},
+			in:   []string{"-u=admin", "host:8554", "-n", "live"},
+			want: []string{"-u=admin", "-n", "live", "host:8554"},
 		},
 		{
 			in:   []string{"-pw", "-secret", "host"},
