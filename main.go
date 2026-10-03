@@ -61,6 +61,7 @@ func init() { runtime.LockOSThread() }
 var boolFlags = map[string]bool{"h": true, "help": true, "stats": true}
 
 func main() {
+	runNotifierIfRequested()
 	cfg, err := parseArgs(os.Args[1:])
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "peep: %v\nrun 'peep -h' for usage\n", err)

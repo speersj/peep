@@ -22,6 +22,9 @@ To run:
     clipboard. macOS uses `osascript`, which is built in.
   - A **Secret Service keyring**, such as gnome-keyring, KWallet or
     KeePassXC, to remember camera passwords. macOS uses the Keychain.
+  - A **desktop notification server** (mako, dunst, swaync, Quickshell,
+    GNOME, KDE, …) and **xdg-open** (from xdg-utils), to be told about
+    screenshots and open them with a click. This is Linux and BSD only.
 
 On Arch Linux:
 
@@ -107,15 +110,23 @@ Flags and the host can be given in any order.
 | Input          | Action                                                    |
 | -------------- | --------------------------------------------------------- |
 | esc, q         | quit                                                      |
-| space, click   | save a screenshot and copy it to the clipboard            |
+| space, click   | save a screenshot, copy it to the clipboard and notify    |
 
 Keys follow your keyboard layout, so a Caps Lock remapped to Escape (for
 example with XKB's `caps:escape`) also quits.
 
 Screenshots are saved at the stream's full resolution as
 `~/Pictures/peep-YYYY-MM-DD-HH-MM.png`, using your local time zone. Further
-shots in the same minute get a `-2`, `-3`, … suffix. On Wayland, the window's
-app ID is `peep`, which you can use in compositor window rules.
+shots in the same minute get a `-2`, `-3`, … suffix.
+
+Each screenshot also shows a desktop notification. If your notification server
+supports actions, clicking the notification opens the screenshot in your
+default PNG viewer (`xdg-mime query default image/png`). A small detached peep
+process waits for that click, so it still works after peep has quit. The
+process exits when the notification is dismissed, or after an hour.
+
+On Wayland, the window's app ID is `peep`, which you can use in compositor
+window rules.
 
 ## Saved cameras and passwords
 
