@@ -51,7 +51,7 @@ type config struct {
 	buffer  time.Duration
 	hwaccel string
 	stats   bool
-	detect  bool
+	detect  bool // the camera's object detection setting
 }
 
 // SDL, and the OpenGL context it renders with, must stay on one OS thread,
@@ -59,7 +59,7 @@ type config struct {
 func init() { runtime.LockOSThread() }
 
 // boolFlags are the flags that take no value, which normalizeArgs must know.
-var boolFlags = map[string]bool{"h": true, "help": true, "stats": true, "detect": true}
+var boolFlags = map[string]bool{"h": true, "help": true, "stats": true}
 
 func main() {
 	runNotifierIfRequested()
@@ -88,7 +88,6 @@ func parseArgs(args []string) (config, error) {
 	fs.DurationVar(&cfg.buffer, "buffer", 250*time.Millisecond, "playback delay used to smooth out network jitter (0 for lowest latency)")
 	fs.StringVar(&cfg.hwaccel, "hwaccel", "auto", "ffmpeg hardware decoding method, e.g. auto, vaapi, cuda; \"none\" to disable")
 	fs.BoolVar(&cfg.stats, "stats", false, "print playback statistics to stderr once a second")
-	fs.BoolVar(&cfg.detect, "detect", false, "detect people, vehicles and animals, outlining them and showing a notification when one appears")
 	fs.Usage = func() {
 		fmt.Fprintf(fs.Output(), "Usage: peep [flags] [camera]\n\n"+
 			"Displays a live RTSP camera feed; ESC or q quits. Space or a\n"+

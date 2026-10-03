@@ -191,7 +191,8 @@ func startDecoding(ctx context.Context, input []string, decs []decoder, frameLen
 			return st, dec, nil // a failure is reported by the render loop
 		}
 		st.stop()
-		fmt.Fprintf(os.Stderr, "peep: %s decoding failed, trying %s: %v\n", dec.name, decs[i+1].name, err)
+		// ffmpeg's reason is buried in its log, which -stats shows.
+		fmt.Fprintf(os.Stderr, "peep: %s decoding failed, using %s instead (-stats shows ffmpeg's log)\n", dec.name, decs[i+1].name)
 	}
 	panic("no decoders")
 }

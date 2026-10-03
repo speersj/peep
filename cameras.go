@@ -67,6 +67,7 @@ type savedCamera struct {
 	Port             int       `json:"port"`
 	User             string    `json:"user,omitempty"`
 	Stream           string    `json:"stream"`
+	Detect           bool      `json:"detect,omitempty"` // object detection on
 	RememberPassword bool      `json:"remember_password,omitempty"`
 	LastUsed         time.Time `json:"last_used"`
 }
@@ -137,11 +138,12 @@ func (c savedCamera) dropPassword() error {
 
 func (c savedCamera) config(base config) config {
 	base.camera, base.host, base.port, base.user, base.stream = c.Name, c.Host, c.Port, c.User, c.Stream
+	base.detect = c.Detect
 	return base
 }
 
 func cameraFromConfig(cfg config) savedCamera {
-	return savedCamera{Name: cfg.camera, Host: cfg.host, Port: cfg.port, User: cfg.user, Stream: cfg.stream}
+	return savedCamera{Name: cfg.camera, Host: cfg.host, Port: cfg.port, User: cfg.user, Stream: cfg.stream, Detect: cfg.detect}
 }
 
 // camerasPath is where previously opened cameras are remembered.

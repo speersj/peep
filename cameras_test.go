@@ -170,7 +170,12 @@ func TestPickerWizard(t *testing.T) {
 	if m.err == "" || m.step != stepHost {
 		t.Fatalf("empty host accepted: step %d, err %q", m.step, m.err)
 	}
-	m = press(m, "cam:8554", "enter", "live/ch0", "enter", "admin", "enter", "s3cret", "enter")
+	m = press(m, "cam:8554", "enter", "live/ch0", "enter")
+	if m.step != stepDetect {
+		t.Fatalf("step %d after the stream; want the detection choice", m.step)
+	}
+	m = press(m, "x", "y") // other keys are ignored; y chooses and moves on
+	m = press(m, "admin", "enter", "s3cret", "enter")
 	if m.screen != screenRemember || m.result != nil {
 		t.Fatalf("expected remember prompt; screen %d, err %q", m.screen, m.err)
 	}
@@ -181,15 +186,15 @@ func TestPickerWizard(t *testing.T) {
 	if m.result == nil {
 		t.Fatalf("wizard did not finish; step %d, err %q", m.step, m.err)
 	}
-	want := config{camera: "door", host: "cam", port: 8554, stream: "live/ch0", user: "admin", pass: "s3cret", hwaccel: "auto", passChoice: passRemember}
+	want := config{camera: "door", host: "cam", port: 8554, stream: "live/ch0", user: "admin", pass: "s3cret", hwaccel: "auto", detect: true, passChoice: passRemember}
 	if *m.result != want {
 		t.Fatalf("result = %+v; want %+v", *m.result, want)
 	}
 
 	// Without a username the password step is skipped.
-	m = press(newPicker(base, nil), "door", "enter", "cam", "enter", "live", "enter", "enter")
-	if m.result == nil || m.result.port != 554 || m.result.user != "" {
-		t.Fatalf("result = %+v; want port 554 and no user", m.result)
+	m = press(newPicker(base, nil), "door", "enter", "cam", "enter", "live", "enter", "enter", "enter")
+	if m.result == nil || m.result.port != 554 || m.result.user != "" || m.result.detect {
+		t.Fatalf("result = %+v; want port 554, no user and detection off", m.result)
 	}
 }
 
@@ -231,13 +236,22 @@ func TestPickerSaved(t *testing.T) {
 		t.Fatalf("duplicate name accepted: step %d, err %q", m.step, m.err)
 	}
 
+	// t toggles detection for the selected camera, to be saved on exit.
+	m = press(newPicker(config{}, cams), "down", "t")
+	if !m.changed || !m.cams[1].Detect || m.cams[0].Detect {
+		t.Fatalf("toggle: changed %v, cams %+v", m.changed, m.cams)
+	}
+	if m = press(m, "t"); m.cams[1].Detect {
+		t.Fatal("second t did not turn detection off")
+	}
+
 	// Editing and renaming records the old name so it is replaced.
 	m = press(newPicker(config{}, cams), "e")
 	if m.screen != screenWizard || m.editing != "open" || m.inputs[stepHost].Value() != "open" {
 		t.Fatalf("edit did not prefill the wizard: %+v", m.editing)
 	}
 	m.inputs[stepName].SetValue("porch")
-	m = press(m, "enter", "enter", "enter", "enter")
+	m = press(m, "enter", "enter", "enter", "enter", "enter")
 	if m.result == nil || m.result.camera != "porch" || m.result.replaces != "open" {
 		t.Fatalf("rename: result = %+v; want porch replacing open", m.result)
 	}
@@ -246,7 +260,7 @@ func TestPickerSaved(t *testing.T) {
 func TestStartPicker(t *testing.T) {
 	keyring.MockInit()
 	cams := []savedCamera{
-		{Name: "open", Host: "open", Port: 554, Stream: "a"},
+		{Name: "open", Host: "open", Port: 554, Stream: "a", Detect: true},
 		{Name: "locked", Host: "locked", Port: 554, User: "admin", Stream: "b"},
 		{Name: "saved", Host: "saved", Port: 554, User: "admin", Stream: "c", RememberPassword: true},
 	}
@@ -257,7 +271,7 @@ func TestStartPicker(t *testing.T) {
 	if m, ready := startPicker(config{}, cams); ready != nil || m.screen != screenList || m.direct {
 		t.Fatalf("no name: ready %+v, screen %d; want the list", ready, m.screen)
 	}
-	if _, ready := startPicker(config{camera: "OPEN"}, cams); ready == nil || ready.host != "open" {
+	if _, ready := startPicker(config{camera: "OPEN"}, cams); ready == nil || ready.host != "open" || !ready.detect {
 		t.Fatalf("no username: ready = %+v; want it to connect", ready)
 	}
 	if _, ready := startPicker(config{camera: "saved"}, cams); ready == nil || ready.pass != "pw" || ready.passChoice != passKeep {
@@ -276,7 +290,7 @@ func TestStartPicker(t *testing.T) {
 	if ready != nil || m.screen != screenWizard || m.step != stepHost || m.inputs[stepName].Value() != "garage" {
 		t.Fatalf("unknown camera: screen %d step %d; want the wizard at the host step", m.screen, m.step)
 	}
-	m = press(m, "garage.local", "enter", "live", "enter", "enter")
+	m = press(m, "garage.local", "enter", "live", "enter", "enter", "enter")
 	if m.result == nil || m.result.camera != "garage" || m.result.host != "garage.local" {
 		t.Fatalf("unknown camera: result = %+v", m.result)
 	}

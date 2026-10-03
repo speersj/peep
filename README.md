@@ -25,7 +25,7 @@ To run:
   - A **desktop notification server** (mako, dunst, swaync, Quickshell,
     GNOME, KDE, …) and **xdg-open** (from xdg-utils), to be told about
     screenshots and open them with a click. This is Linux and BSD only.
-  - **ONNX Runtime** 1.23 or newer (`libonnxruntime.so`), for `-detect`.
+  - **ONNX Runtime** 1.23 or newer (`libonnxruntime.so`), for [detection](#detection).
   - A VA-API driver for hardware decoding, such as `intel-media-driver` for
     Intel GPUs (Broadwell and newer), `libva-mesa-driver` for AMD, or
     `libva-nvidia-driver` for NVIDIA. Without one, ffmpeg decodes on the CPU.
@@ -77,8 +77,8 @@ Cameras are saved under a name you choose, such as `frontdoor`.
     it connects straight away.
   - Otherwise peep asks for the password, then offers to remember it.
   - If there is no camera called `frontdoor`, a short wizard adds one under
-    that name. It asks for the host, stream path, and optionally a username
-    and password.
+    that name. It asks for the host, stream path, whether to turn on
+    [detection](#detection), and optionally a username and password.
 - **`peep`** with no name lists the saved cameras, newest first, along with
   an option to add a new one.
 
@@ -87,6 +87,7 @@ Cameras are saved under a name you choose, such as `frontdoor`.
 | ↑ / ↓, j / k  | move                              |
 | enter         | connect                           |
 | e             | edit the selected camera          |
+| t             | toggle detection for the camera   |
 | d             | forget the selected camera        |
 | q / esc       | quit                              |
 
@@ -101,7 +102,6 @@ port defaults to **554**.
 | `-buffer`  | `250ms` | Playback delay that smooths out network jitter; `0` for the lowest latency.  |
 | `-hwaccel` | `auto`  | Hardware decoding: `auto`, `vaapi`, another ffmpeg method such as `cuda`, or `none`. See below. |
 | `-stats`   | off     | Print playback statistics and ffmpeg warnings to stderr every second.        |
-| `-detect`  | off     | Detect people, vehicles and animals; see [Detection](#detection).            |
 
 Flags and the camera name can be given in any order, e.g.
 `peep frontdoor -buffer 0`.
@@ -141,7 +141,11 @@ window rules.
 
 ## Detection
 
-With `-detect`, peep looks for people, vehicles (bicycles, cars, motorcycles,
+Detection is a per-camera setting. The wizard asks whether to turn it on when
+you add or edit a camera, and `t` in the camera list toggles it for the
+selected camera. Cameras with detection on are marked "detection" in the list.
+
+With detection on, peep looks for people, vehicles (bicycles, cars, motorcycles,
 buses and trucks) and animals (birds, cats, dogs, horses, sheep, cows and
 bears) about four times a second. It outlines each one in the video with its
 label and confidence. Other objects, such as furniture, are ignored.
@@ -161,7 +165,7 @@ Detection uses YOLOX-s (Apache-2.0), a model trained on the COCO dataset. It
 runs on the CPU through ONNX Runtime, takes about a quarter of a second per
 frame and uses under one core, and never holds up playback. The model
 (36 MB) is downloaded from the YOLOX GitHub release the first time you use
-`-detect`, checked against a fixed SHA-256, and kept in `~/.cache/peep/models`.
+detection, checked against a fixed SHA-256, and kept in `~/.cache/peep/models`.
 
 Small or distant objects and night-time infrared footage are detected less
 reliably.
