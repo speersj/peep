@@ -1,6 +1,7 @@
 package main
 
 import (
+	"math"
 	"net/url"
 	"testing"
 )
@@ -121,6 +122,14 @@ func TestNormalizeArgs(t *testing.T) {
 			in:   []string{"host", "--", "-weird"},
 			want: []string{"--", "host", "-weird"},
 		},
+		{
+			in:   []string{"-stats", "host", "-n", "live"},
+			want: []string{"-stats", "-n", "live", "host"},
+		},
+		{
+			in:   []string{"host", "-buffer", "500ms", "--stats"},
+			want: []string{"-buffer", "500ms", "--stats", "host"},
+		},
 	}
 	for _, tt := range tests {
 		got := normalizeArgs(tt.in)
@@ -172,6 +181,71 @@ func TestFitWindow(t *testing.T) {
 		if gotW != tt.wantW || gotH != tt.wantH {
 			t.Errorf("fitWindow(%d, %d, %d, %d) = %d, %d; want %d, %d",
 				tt.w, tt.h, tt.maxW, tt.maxH, gotW, gotH, tt.wantW, tt.wantH)
+		}
+	}
+}
+
+func TestPlanGeom(t *testing.T) {
+	tests := []struct {
+		w, h       int
+		want       frameGeom
+		wantPacked [2]int
+	}{
+		{2560, 1440, frameGeom{2560, 1440, 2560, 1440, "scale=out_range=tv"}, [2]int{640, 2160}},
+		{8192, 4320, frameGeom{4096, 2160, 4096, 2160, "scale=4096:2160:out_range=tv"}, [2]int{1024, 3240}},
+		{642, 361, frameGeom{642, 361, 644, 362, "scale=out_range=tv,pad=644:362"}, [2]int{161, 543}},
+	}
+	for _, tt := range tests {
+		got := planGeom(tt.w, tt.h, 4096)
+		if got != tt.want {
+			t.Errorf("planGeom(%d, %d) = %+v; want %+v", tt.w, tt.h, got, tt.want)
+		}
+		if pw, ph := got.packedSize(); pw != tt.wantPacked[0] || ph != tt.wantPacked[1] {
+			t.Errorf("planGeom(%d, %d).packedSize() = %d, %d; want %v", tt.w, tt.h, pw, ph, tt.wantPacked)
+		}
+		if pw, ph := got.packedSize(); pw*ph*4 != got.frameLen() {
+			t.Errorf("planGeom(%d, %d): packed image holds %d bytes, frame is %d", tt.w, tt.h, pw*ph*4, got.frameLen())
+		}
+	}
+}
+
+func TestParseProbe(t *testing.T) {
+	info, err := parseProbe("width=2560\nheight=1440\nr_frame_rate=25/1\navg_frame_rate=30000/1001\ncolor_space=bt709\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.width != 2560 || info.height != 1440 || math.Abs(info.fps-29.97) > 0.01 || info.colorSpace != "bt709" {
+		t.Errorf("parseProbe = %+v", info)
+	}
+
+	info, err = parseProbe("width=640\nheight=360\nr_frame_rate=15/1\navg_frame_rate=0/0\ncolor_space=unknown\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.fps != 15 {
+		t.Errorf("fps = %v; want r_frame_rate fallback 15", info.fps)
+	}
+
+	if _, err := parseProbe("width=N/A\nheight=N/A\n"); err == nil {
+		t.Error("parseProbe accepted missing dimensions")
+	}
+}
+
+func TestParseRate(t *testing.T) {
+	for in, want := range map[string]float64{"25/1": 25, "30000/1001": 30000.0 / 1001, "0/0": 0, "90000/1": 0, "12": 12, "N/A": 0} {
+		if got := parseRate(in); got != want {
+			t.Errorf("parseRate(%q) = %v; want %v", in, got, want)
+		}
+	}
+}
+
+func TestColorCoeffs(t *testing.T) {
+	if got := colorCoeffs("smpte170m"); &got[0] != &bt601Coeffs[0] {
+		t.Error("smpte170m should use BT.601")
+	}
+	for _, cs := range []string{"bt709", "unknown", ""} {
+		if got := colorCoeffs(cs); &got[0] != &bt709Coeffs[0] {
+			t.Errorf("%q should use BT.709", cs)
 		}
 	}
 }
