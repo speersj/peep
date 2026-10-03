@@ -127,8 +127,22 @@ func (g *game) init() error {
 	return nil
 }
 
+// quitKeys close the window. ebiten reports physical keys, so a Caps Lock
+// remapped to Escape by the keyboard layout (e.g. XKB's caps:escape) arrives
+// as KeyCapsLock and does not quit.
+var quitKeys = []ebiten.Key{ebiten.KeyEscape, ebiten.KeyQ}
+
+func quitPressed() bool {
+	for _, k := range quitKeys {
+		if inpututil.IsKeyJustPressed(k) {
+			return true
+		}
+	}
+	return false
+}
+
 func (g *game) Update() error {
-	if inpututil.IsKeyJustPressed(ebiten.KeyEscape) || g.ctx.Err() != nil {
+	if quitPressed() || g.ctx.Err() != nil {
 		return ebiten.Termination
 	}
 	if err := g.st.cap.Err(); err != nil {

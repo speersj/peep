@@ -55,3 +55,33 @@ func TestWriteScreenshot(t *testing.T) {
 		t.Fatalf("pixel red = %d; want 200", r>>8)
 	}
 }
+
+func TestClipboardCommand(t *testing.T) {
+	env := func(vars map[string]string) func(string) string {
+		return func(k string) string { return vars[k] }
+	}
+	tests := []struct {
+		goos      string
+		env       map[string]string
+		wantCmd   string
+		wantStdin bool
+		wantErr   bool
+	}{
+		{goos: "linux", env: map[string]string{"WAYLAND_DISPLAY": "wayland-1", "DISPLAY": ":0"}, wantCmd: "wl-copy", wantStdin: true},
+		{goos: "linux", env: map[string]string{"DISPLAY": ":0"}, wantCmd: "xclip", wantStdin: true},
+		{goos: "freebsd", env: map[string]string{"DISPLAY": ":0"}, wantCmd: "xclip", wantStdin: true},
+		{goos: "linux", env: nil, wantErr: true},
+		{goos: "darwin", env: nil, wantCmd: "osascript"},
+		{goos: "windows", env: nil, wantErr: true},
+	}
+	for _, tt := range tests {
+		args, stdin, err := clipboardCommand(tt.goos, env(tt.env), "/tmp/shot.png")
+		if (err != nil) != tt.wantErr {
+			t.Errorf("%s %v: error = %v, wantErr %v", tt.goos, tt.env, err, tt.wantErr)
+			continue
+		}
+		if !tt.wantErr && (args[0] != tt.wantCmd || stdin != tt.wantStdin) {
+			t.Errorf("%s %v: got %v stdin=%v; want %s stdin=%v", tt.goos, tt.env, args, stdin, tt.wantCmd, tt.wantStdin)
+		}
+	}
+}

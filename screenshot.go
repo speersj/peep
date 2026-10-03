@@ -64,8 +64,9 @@ func writeScreenshot(img image.Image, t time.Time) (string, error) {
 	return f.Name(), nil
 }
 
-// screenshot captures the current frame at the stream's resolution and
-// saves it in the background, so encoding does not stall playback.
+// screenshot captures the current frame at the stream's resolution, then
+// saves it and copies it to the clipboard in the background, so encoding
+// does not stall playback.
 func (g *game) screenshot() {
 	if !g.hasFrame {
 		return
@@ -84,6 +85,10 @@ func (g *game) screenshot() {
 			fmt.Fprintf(os.Stderr, "peep: saving screenshot: %v\n", err)
 			return
 		}
-		fmt.Fprintf(os.Stderr, "peep: saved %s\n", path)
+		if err := copyImageFile(path); err != nil {
+			fmt.Fprintf(os.Stderr, "peep: saved %s (not copied to the clipboard: %v)\n", path, err)
+			return
+		}
+		fmt.Fprintf(os.Stderr, "peep: saved %s and copied it to the clipboard\n", path)
 	})
 }

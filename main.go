@@ -3,8 +3,8 @@
 // Video is decoded by ffmpeg, which streams raw NV12 frames over a pipe;
 // no video is written to disk. Frames are held in a short jitter buffer
 // and shown on their own timestamps, then converted to RGB on the GPU.
-// Press ESC in the window to quit, and space or click to save a screenshot
-// to ~/Pictures.
+// Press ESC or q in the window to quit, and space or click to save a
+// screenshot to ~/Pictures and copy it to the clipboard.
 package main
 
 import (
@@ -91,8 +91,9 @@ func parseArgs(args []string) (config, error) {
 	fs.BoolVar(&cfg.stats, "stats", false, "print playback statistics to stderr once a second")
 	fs.Usage = func() {
 		fmt.Fprintf(fs.Output(), "Usage: peep [flags] [<host>[:port]]\n\n"+
-			"Displays a live RTSP feed; ESC quits. Space or a click saves a\n"+
-			"screenshot to ~/Pictures. The port defaults to %d.\n"+
+			"Displays a live RTSP feed; ESC or q quits. Space or a click\n"+
+			"saves a screenshot to ~/Pictures and copies it to the clipboard.\n"+
+			"The port defaults to %d.\n"+
 			"Without a host, an interactive picker offers previously opened\n"+
 			"cameras or walks through entering a new one.\n\n", defaultPort)
 		fs.PrintDefaults()
