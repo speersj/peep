@@ -4,8 +4,8 @@ package main
 
 import "errors"
 
-// notifyScreenshot is only implemented for freedesktop.org (D-Bus) desktops.
-func notifyScreenshot(string, bool) error {
+// notifyImage is only implemented for freedesktop.org (D-Bus) desktops.
+func notifyImage(notification) error {
 	return errors.New("desktop notifications are not supported on this platform")
 }
 

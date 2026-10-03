@@ -87,7 +87,16 @@ func (p *player) screenshot() {
 		} else {
 			fmt.Fprintf(os.Stderr, "peep: saved %s and copied it to the clipboard\n", path)
 		}
-		if err := notifyScreenshot(path, copyErr == nil); err != nil {
+		n := notification{
+			image:    path,
+			summary:  "Screenshot saved",
+			body:     filepath.Base(path),
+			category: "transfer.complete",
+		}
+		if copyErr == nil {
+			n.body += "\nCopied to the clipboard"
+		}
+		if err := notifyImage(n); err != nil {
 			fmt.Fprintf(os.Stderr, "peep: screenshot notification: %v\n", err)
 		}
 	})

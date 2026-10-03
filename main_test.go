@@ -238,6 +238,15 @@ func TestParseProbe(t *testing.T) {
 		t.Errorf("fps = %v; want r_frame_rate fallback 15", info.fps)
 	}
 
+	if info.fullRange {
+		t.Error("limited-range stream reported as full range")
+	}
+	for _, out := range []string{"width=640\nheight=360\ncolor_range=pc\n", "width=640\nheight=360\npix_fmt=yuvj420p\n"} {
+		if info, err := parseProbe(out); err != nil || !info.fullRange {
+			t.Errorf("parseProbe(%q).fullRange = false, %v; want true", out, err)
+		}
+	}
+
 	if _, err := parseProbe("width=N/A\nheight=N/A\n"); err == nil {
 		t.Error("parseProbe accepted missing dimensions")
 	}

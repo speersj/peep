@@ -63,6 +63,7 @@ type player struct {
 	geom       frameGeom
 	colorspace sdl.Colorspace
 	stats      bool
+	det        *detector // nil unless detection is on
 
 	renderer *sdl.Renderer
 	yuv      *sdl.Texture // the current frame as decoded, NV12
@@ -204,6 +205,9 @@ func (p *player) update(now time.Time) error {
 	}
 	if f := p.sched.next(now); f != nil {
 		err := p.uploadFrame(f.buf) // copies, so the buffer can be reused
+		if p.det != nil {
+			p.det.submit(f.buf, now)
+		}
 		p.st.cap.release(f.buf)
 		if err != nil {
 			return fmt.Errorf("uploading frame: %w", err)
@@ -250,8 +254,45 @@ func (p *player) draw() error {
 		if err := r.RenderTexture(p.rgb, nil, nil); err != nil {
 			return fmt.Errorf("drawing frame: %w", err)
 		}
+		if p.det != nil {
+			p.drawDetections(p.det.current(time.Now()))
+		}
 	}
 	return r.Present()
+}
+
+// drawDetections outlines and labels detected objects. Coordinates are in
+// frame pixels, which the logical presentation maps onto the window.
+func (p *player) drawDetections(dets []detection) {
+	r := p.renderer
+	w := float32(p.geom.width)
+	thick := max(2, w/400)
+	// Scale the 8px debug font with the frame so labels stay readable
+	// when it is shown smaller.
+	textScale := max(1, w/500)
+	charSize := float32(sdl.DEBUG_TEXT_FONT_CHARACTER_SIZE) * textScale
+	for _, d := range dets {
+		c := kindColors[classKind(d.class)]
+		r.SetDrawColor(c.R, c.G, c.B, 255)
+		r.RenderFillRects([]sdl.FRect{
+			{X: d.x0, Y: d.y0, W: d.x1 - d.x0, H: thick},
+			{X: d.x0, Y: d.y1 - thick, W: d.x1 - d.x0, H: thick},
+			{X: d.x0, Y: d.y0, W: thick, H: d.y1 - d.y0},
+			{X: d.x1 - thick, Y: d.y0, W: thick, H: d.y1 - d.y0},
+		})
+		label := d.label()
+		pad := charSize / 4
+		lw, lh := float32(len(label))*charSize+2*pad, charSize+2*pad
+		ly := d.y0 - lh
+		if ly < 0 {
+			ly = d.y0 // no room above the box
+		}
+		r.RenderFillRect(&sdl.FRect{X: d.x0, Y: ly, W: lw, H: lh})
+		r.SetDrawColor(0, 0, 0, 255)
+		r.SetScale(textScale, textScale)
+		r.DebugText((d.x0+pad)/textScale, (ly+pad)/textScale, label)
+		r.SetScale(1, 1)
+	}
 }
 
 // readFrame reads the current frame back from the GPU as RGBA, at the
@@ -295,8 +336,12 @@ func (p *player) printStats(now time.Time) {
 	}
 	recv := p.st.cap.Received()
 	s := p.sched
-	fmt.Fprintf(os.Stderr, "recv %.1f fps, shown %.1f fps, cadence %.2f fps, queued %d, late %d, dropped %d, skips %d, latency %.0fms, loop %.0f/s\n",
+	detect := ""
+	if p.det != nil {
+		detect = fmt.Sprintf(", detect %.0fms", float64(p.det.lastDuration())/float64(time.Millisecond))
+	}
+	fmt.Fprintf(os.Stderr, "recv %.1f fps, shown %.1f fps, cadence %.2f fps, queued %d, late %d, dropped %d, skips %d, latency %.0fms, loop %.0f/s%s\n",
 		float64(recv-p.statsRecv)/elapsed, float64(s.shown-p.statsShown)/elapsed, float64(time.Second)/float64(s.interval),
-		len(s.pending), s.late, s.dropped, s.reanchors, s.slack*1000, float64(p.loops-p.statsLoops)/elapsed)
+		len(s.pending), s.late, s.dropped, s.reanchors, s.slack*1000, float64(p.loops-p.statsLoops)/elapsed, detect)
 	p.statsAt, p.statsRecv, p.statsShown, p.statsLoops = now, recv, s.shown, p.loops
 }

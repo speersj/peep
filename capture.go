@@ -129,24 +129,107 @@ type streamer struct {
 	done   chan struct{}
 }
 
-// captureArgs builds the ffmpeg command line: decode input (with optional
-// hardware acceleration) and emit every frame exactly once as raw NV12 on
-// stdout. filter is an ffmpeg -vf
-// expression ("" for none); verbose raises the log level to include
-// warnings such as decode errors. Nothing is written to disk.
-func captureArgs(input []string, hwaccel, filter string, verbose bool) []string {
+// decoder is how ffmpeg decodes the stream and turns it into the frames
+// described by a frameGeom.
+type decoder struct {
+	name   string   // for messages
+	hwArgs []string // ffmpeg input options selecting hardware decoding
+	filter string   // ffmpeg -vf expression producing NV12 frames
+}
+
+// decoders lists the decoders to try for -hwaccel, best first. VA-API
+// decodes and converts on the GPU, copying back only the finished NV12
+// frames; when it is available it is tried first, with software decoding
+// as the fallback. Letting ffmpeg download VA-API frames and convert them
+// on the CPU, as plain -hwaccel vaapi does, cost more CPU than decoding in
+// software for a 2560x1440 H.264 camera.
+func decoders(hwaccel string, g frameGeom, vaapiOK bool) []decoder {
+	software := decoder{name: "software", filter: g.filter}
+	vaapi := decoder{
+		name:   "VA-API",
+		hwArgs: []string{"-hwaccel", "vaapi", "-hwaccel_output_format", "vaapi"},
+		filter: g.vaapiFilter(),
+	}
+	switch hwaccel {
+	case "", "none":
+		return []decoder{software}
+	case "auto":
+		if vaapiOK {
+			return []decoder{vaapi, software}
+		}
+		return []decoder{{name: "ffmpeg auto", hwArgs: []string{"-hwaccel", "auto"}, filter: g.filter}}
+	case "vaapi":
+		if vaapiOK {
+			return []decoder{vaapi, software}
+		}
+		return []decoder{software}
+	}
+	return []decoder{{name: hwaccel, hwArgs: []string{"-hwaccel", hwaccel}, filter: g.filter}}
+}
+
+// vaapiAvailable reports whether ffmpeg can open a VA-API device.
+func vaapiAvailable(ctx context.Context) bool {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "ffmpeg", "-hide_banner", "-v", "error", "-nostdin",
+		"-init_hw_device", "vaapi", "-f", "lavfi", "-i", "nullsrc=s=16x16", "-frames:v", "1", "-f", "null", "-")
+	return cmd.Run() == nil
+}
+
+// startDecoding starts capture with the first of decs that delivers a
+// frame, falling back to the next when ffmpeg fails before then, e.g. when
+// the GPU cannot decode the stream's codec. A decoder still connecting
+// after startupWait is kept.
+func startDecoding(ctx context.Context, input []string, decs []decoder, frameLen, poolSize int, logTo io.Writer) (*streamer, decoder, error) {
+	for i, dec := range decs {
+		st, err := startCapture(ctx, input, dec, frameLen, poolSize, logTo)
+		if err != nil {
+			return nil, dec, err
+		}
+		err = st.waitStarted(ctx, startupWait)
+		if err == nil || i == len(decs)-1 || ctx.Err() != nil {
+			return st, dec, nil // a failure is reported by the render loop
+		}
+		st.stop()
+		fmt.Fprintf(os.Stderr, "peep: %s decoding failed, trying %s: %v\n", dec.name, decs[i+1].name, err)
+	}
+	panic("no decoders")
+}
+
+// startupWait is how long startDecoding waits for a first frame.
+const startupWait = 15 * time.Second
+
+// waitStarted waits until the first frame arrives, returning ffmpeg's
+// error if it fails first. Running out of time is not an error.
+func (s *streamer) waitStarted(ctx context.Context, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) && ctx.Err() == nil {
+		if s.cap.Received() > 0 {
+			return nil
+		}
+		if err := s.cap.Err(); err != nil {
+			return err
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	return nil
+}
+
+// captureArgs builds the ffmpeg command line: decode input with dec and
+// emit every frame exactly once as raw NV12 on stdout. verbose raises the
+// log level to include warnings such as decode errors. Nothing is written
+// to disk.
+func captureArgs(input []string, dec decoder, verbose bool) []string {
 	level := "error"
 	if verbose {
 		level = "warning"
 	}
 	args := []string{"-hide_banner", "-loglevel", level, "-nostdin"}
-	if hwaccel != "" && hwaccel != "none" {
-		args = append(args, "-hwaccel", hwaccel)
-	}
+	args = append(args, dec.hwArgs...)
 	args = append(args, input...)
 	args = append(args, "-an", "-sn")
-	if filter != "" {
-		args = append(args, "-vf", filter)
+	if dec.filter != "" {
+		args = append(args, "-vf", dec.filter)
 	}
 	return append(args,
 		// rawvideo carries no timestamps, so without passthrough ffmpeg
@@ -156,12 +239,13 @@ func captureArgs(input []string, hwaccel, filter string, verbose bool) []string 
 	)
 }
 
-// startCapture spawns ffmpeg with input as its input arguments and starts
-// feeding frames of frameLen bytes into a capture with a pool of poolSize
-// buffers. When logTo is non-nil, ffmpeg's warnings are also copied to it.
-func startCapture(ctx context.Context, input []string, hwaccel, filter string, frameLen, poolSize int, logTo io.Writer) (*streamer, error) {
+// startCapture spawns ffmpeg with input as its input arguments, decoding
+// with dec, and starts feeding frames of frameLen bytes into a capture with
+// a pool of poolSize buffers. When logTo is non-nil, ffmpeg's warnings are
+// also copied to it.
+func startCapture(ctx context.Context, input []string, dec decoder, frameLen, poolSize int, logTo io.Writer) (*streamer, error) {
 	ctx, cancel := context.WithCancel(ctx)
-	cmd := exec.CommandContext(ctx, "ffmpeg", captureArgs(input, hwaccel, filter, logTo != nil)...)
+	cmd := exec.CommandContext(ctx, "ffmpeg", captureArgs(input, dec, logTo != nil)...)
 
 	frames, framesW, err := os.Pipe()
 	if err != nil {

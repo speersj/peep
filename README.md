@@ -25,11 +25,15 @@ To run:
   - A **desktop notification server** (mako, dunst, swaync, Quickshell,
     GNOME, KDE, …) and **xdg-open** (from xdg-utils), to be told about
     screenshots and open them with a click. This is Linux and BSD only.
+  - **ONNX Runtime** 1.23 or newer (`libonnxruntime.so`), for `-detect`.
+  - A VA-API driver for hardware decoding, such as `intel-media-driver` for
+    Intel GPUs (Broadwell and newer), `libva-mesa-driver` for AMD, or
+    `libva-nvidia-driver` for NVIDIA. Without one, ffmpeg decodes on the CPU.
 
 On Arch Linux:
 
 ```sh
-sudo pacman -S go ffmpeg sdl3 wl-clipboard
+sudo pacman -S go ffmpeg sdl3 wl-clipboard onnxruntime-cpu intel-media-driver
 ```
 
 On Debian or Ubuntu, `libsdl3-0` is only in recent releases:
@@ -95,11 +99,22 @@ port defaults to **554**.
 | Flag       | Default | Description                                                                  |
 | ---------- | ------- | ---------------------------------------------------------------------------- |
 | `-buffer`  | `250ms` | Playback delay that smooths out network jitter; `0` for the lowest latency.  |
-| `-hwaccel` | `auto`  | ffmpeg hardware decoder, e.g. `vaapi` or `cuda`; `none` to disable.          |
+| `-hwaccel` | `auto`  | Hardware decoding: `auto`, `vaapi`, another ffmpeg method such as `cuda`, or `none`. See below. |
 | `-stats`   | off     | Print playback statistics and ffmpeg warnings to stderr every second.        |
+| `-detect`  | off     | Detect people, vehicles and animals; see [Detection](#detection).            |
 
 Flags and the camera name can be given in any order, e.g.
 `peep frontdoor -buffer 0`.
+
+With `-hwaccel auto` or `vaapi`, peep uses VA-API when a VA-API device is
+available. The GPU then decodes and converts each frame, and only the
+finished frame is copied back to memory, which takes less CPU than decoding
+in software. If the GPU cannot decode the stream, for example because of an
+unsupported codec, peep falls back to software decoding and says so.
+Full-range (JPEG-style) streams are always decoded in software, because
+VA-API scaling on Intel's driver does not convert their colour range. When
+VA-API is not available, `auto` lets ffmpeg pick another method. `-stats`
+shows which decoder is in use.
 
 ### In the video window
 
@@ -123,6 +138,33 @@ process exits when the notification is dismissed, or after an hour.
 
 On Wayland, the window's app ID is `peep`, which you can use in compositor
 window rules.
+
+## Detection
+
+With `-detect`, peep looks for people, vehicles (bicycles, cars, motorcycles,
+buses and trucks) and animals (birds, cats, dogs, horses, sheep, cows and
+bears) about four times a second. It outlines each one in the video with its
+label and confidence. Other objects, such as furniture, are ignored.
+
+When something appears, peep shows a notification such as "Person detected",
+naming the camera, the time and the confidence. The notification has a
+thumbnail, and clicking it opens the full frame with the detections outlined.
+The frames are saved in `~/.cache/peep/detections` and deleted after a week.
+
+To avoid repeated or false alerts:
+
+- an object must be seen in two analyses in a row before it is announced;
+- an object that stays in view, such as a parked car, is announced once;
+- a class is announced again only after it has been gone for 30 seconds.
+
+Detection uses YOLOX-s (Apache-2.0), a model trained on the COCO dataset. It
+runs on the CPU through ONNX Runtime, takes about a quarter of a second per
+frame and uses under one core, and never holds up playback. The model
+(36 MB) is downloaded from the YOLOX GitHub release the first time you use
+`-detect`, checked against a fixed SHA-256, and kept in `~/.cache/peep/models`.
+
+Small or distant objects and night-time infrared footage are detected less
+reliably.
 
 ## Saved cameras and passwords
 
@@ -150,6 +192,13 @@ without asking.
 ```sh
 go test ./...
 go vet ./...
+```
+
+`TestDetectorOnFrame` runs the detection model on an image and can check for
+an expected class. It needs ONNX Runtime and ffmpeg:
+
+```sh
+PEEP_DETECT_TEST=frame.png PEEP_DETECT_EXPECT=truck go test -run TestDetectorOnFrame -v .
 ```
 
 `TestRenderMatchesSource` checks SDL's colour conversion and the screenshot

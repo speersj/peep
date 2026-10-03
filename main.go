@@ -51,6 +51,7 @@ type config struct {
 	buffer  time.Duration
 	hwaccel string
 	stats   bool
+	detect  bool
 }
 
 // SDL, and the OpenGL context it renders with, must stay on one OS thread,
@@ -58,7 +59,7 @@ type config struct {
 func init() { runtime.LockOSThread() }
 
 // boolFlags are the flags that take no value, which normalizeArgs must know.
-var boolFlags = map[string]bool{"h": true, "help": true, "stats": true}
+var boolFlags = map[string]bool{"h": true, "help": true, "stats": true, "detect": true}
 
 func main() {
 	runNotifierIfRequested()
@@ -87,6 +88,7 @@ func parseArgs(args []string) (config, error) {
 	fs.DurationVar(&cfg.buffer, "buffer", 250*time.Millisecond, "playback delay used to smooth out network jitter (0 for lowest latency)")
 	fs.StringVar(&cfg.hwaccel, "hwaccel", "auto", "ffmpeg hardware decoding method, e.g. auto, vaapi, cuda; \"none\" to disable")
 	fs.BoolVar(&cfg.stats, "stats", false, "print playback statistics to stderr once a second")
+	fs.BoolVar(&cfg.detect, "detect", false, "detect people, vehicles and animals, outlining them and showing a notification when one appears")
 	fs.Usage = func() {
 		fmt.Fprintf(fs.Output(), "Usage: peep [flags] [camera]\n\n"+
 			"Displays a live RTSP camera feed; ESC or q quits. Space or a\n"+
@@ -154,6 +156,7 @@ type streamInfo struct {
 	width, height int
 	fps           float64 // 0 when unknown
 	colorSpace    string
+	fullRange     bool // full ("pc"/JPEG) rather than limited colour range
 }
 
 // probeStream asks ffprobe for the video size, frame rate and colour space
@@ -169,7 +172,7 @@ func probeStream(ctx context.Context, streamURL string) (streamInfo, error) {
 		"-rtsp_transport", "tcp",
 		"-analyzeduration", "1000000",
 		"-select_streams", "v:0",
-		"-show_entries", "stream=width,height,avg_frame_rate,r_frame_rate,color_space",
+		"-show_entries", "stream=width,height,avg_frame_rate,r_frame_rate,color_space,color_range,pix_fmt",
 		"-of", "default=noprint_wrappers=1",
 		streamURL,
 	)
@@ -211,6 +214,10 @@ func parseProbe(out string) (streamInfo, error) {
 			rFPS = parseRate(val)
 		case "color_space":
 			info.colorSpace = val
+		case "color_range":
+			info.fullRange = info.fullRange || val == "pc"
+		case "pix_fmt":
+			info.fullRange = info.fullRange || strings.HasPrefix(val, "yuvj")
 		}
 	}
 	if info.width <= 0 || info.height <= 0 {
@@ -280,12 +287,27 @@ func run(cfg config) error {
 	if cfg.stats {
 		ffmpegLog = os.Stderr
 	}
-	st, err := startCapture(ctx, input, cfg.hwaccel, geom.filter, geom.frameLen(), pool, ffmpegLog)
+	// scale_vaapi does not convert full-range video to limited range, so
+	// such streams are decoded in software.
+	vaapiOK := (cfg.hwaccel == "auto" || cfg.hwaccel == "vaapi") && !info.fullRange && vaapiAvailable(ctx)
+	st, dec, err := startDecoding(ctx, input, decoders(cfg.hwaccel, geom, vaapiOK), geom.frameLen(), pool, ffmpegLog)
 	if err != nil {
 		return err
 	}
 	defer st.stop()
+	if cfg.stats {
+		fmt.Fprintf(os.Stderr, "peep: decoding with %s\n", dec.name)
+	}
 
+	var det *detector
+	if cfg.detect {
+		// Before the window opens, as the first run downloads the model.
+		if det, err = newDetector(cfg.camera, geom, streamMatrix(info.colorSpace)); err != nil {
+			fmt.Fprintf(os.Stderr, "peep: detection is off: %v\n", err)
+		} else {
+			defer det.close()
+		}
+	}
 	quitSDL, err := initSDL()
 	if err != nil {
 		return err
@@ -306,6 +328,7 @@ func run(cfg config) error {
 		geom:       geom,
 		colorspace: streamColorspace(info.colorSpace),
 		stats:      cfg.stats,
+		det:        det,
 	}
 	defer p.destroy()
 	if err := p.newRenderer(window); err != nil {
@@ -324,6 +347,16 @@ type frameGeom struct {
 }
 
 func (g frameGeom) frameLen() int { return g.padW * g.padH * 3 / 2 }
+
+// vaapiFilter produces the same frames as filter from VA-API surfaces:
+// scaling and range conversion run on the GPU, which then hands back NV12.
+func (g frameGeom) vaapiFilter() string {
+	f := fmt.Sprintf("scale_vaapi=w=%d:h=%d:format=nv12:out_range=tv,hwdownload,format=nv12", g.width, g.height)
+	if g.padW != g.width || g.padH != g.height {
+		f += fmt.Sprintf(",pad=%d:%d", g.padW, g.padH)
+	}
+	return f
+}
 
 // planGeom works out the output geometry and ffmpeg filter for a w x h
 // stream: downscale if too large, normalize to limited colour range (the

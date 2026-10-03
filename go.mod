@@ -8,6 +8,7 @@ require (
 	charm.land/lipgloss/v2 v2.0.6
 	github.com/Zyko0/go-sdl3 v0.1.1
 	github.com/godbus/dbus/v5 v5.2.2
+	github.com/shota3506/onnxruntime-purego v0.0.0-20260315223538-8db8bd7424b2
 	github.com/zalando/go-keyring v0.2.8
 	golang.org/x/sys v0.48.0
 )

@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"slices"
 	"strings"
 	"syscall"
@@ -20,28 +19,34 @@ const (
 	notifyPath  = dbus.ObjectPath("/org/freedesktop/Notifications")
 	notifyIface = "org.freedesktop.Notifications"
 
-	// notifyEnv tells a peep process to run as a screenshot notifier.
-	notifyEnv       = "PEEP_NOTIFY_SCREENSHOT"
-	notifyCopiedEnv = "PEEP_NOTIFY_COPIED"
+	// notifyEnv tells a peep process to run as a notifier for an image; the
+	// others carry the notification's text.
+	notifyEnv         = "PEEP_NOTIFY_IMAGE"
+	notifySummaryEnv  = "PEEP_NOTIFY_SUMMARY"
+	notifyBodyEnv     = "PEEP_NOTIFY_BODY"
+	notifyCategoryEnv = "PEEP_NOTIFY_CATEGORY"
 
 	// notifyWait is how long a notifier waits for its notification to be
 	// clicked before giving up.
 	notifyWait = time.Hour
 )
 
-// notifyScreenshot announces a saved screenshot with a desktop notification
-// that opens it when clicked. A detached copy of peep owns the notification,
-// so clicking it still works after this process exits.
-func notifyScreenshot(path string, copied bool) error {
+// notifyImage shows a desktop notification about the image at n.image,
+// with a thumbnail of it, that opens the image when clicked. A detached copy
+// of peep owns the notification, so clicking it still works after this
+// process exits.
+func notifyImage(n notification) error {
 	exe, err := os.Executable()
 	if err != nil {
 		return err
 	}
 	cmd := exec.Command(exe)
-	cmd.Env = append(os.Environ(), notifyEnv+"="+path)
-	if copied {
-		cmd.Env = append(cmd.Env, notifyCopiedEnv+"=1")
-	}
+	cmd.Env = append(os.Environ(),
+		notifyEnv+"="+n.image,
+		notifySummaryEnv+"="+n.summary,
+		notifyBodyEnv+"="+n.body,
+		notifyCategoryEnv+"="+n.category,
+	)
 	cmd.Stderr = os.Stderr
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true} // survive the terminal closing
 	if err := cmd.Start(); err != nil {
@@ -52,14 +57,19 @@ func notifyScreenshot(path string, copied bool) error {
 }
 
 // runNotifierIfRequested runs the notifier and exits when this process was
-// started by notifyScreenshot.
+// started by notifyImage.
 func runNotifierIfRequested() {
-	path := os.Getenv(notifyEnv)
-	if path == "" {
+	n := notification{
+		image:    os.Getenv(notifyEnv),
+		summary:  os.Getenv(notifySummaryEnv),
+		body:     os.Getenv(notifyBodyEnv),
+		category: os.Getenv(notifyCategoryEnv),
+	}
+	if n.image == "" {
 		return
 	}
-	if err := runNotifier(path, os.Getenv(notifyCopiedEnv) != ""); err != nil {
-		fmt.Fprintf(os.Stderr, "peep: screenshot notification: %v\n", err)
+	if err := runNotifier(n); err != nil {
+		fmt.Fprintf(os.Stderr, "peep: notification: %v\n", err)
 		os.Exit(1)
 	}
 	os.Exit(0)
@@ -67,7 +77,7 @@ func runNotifierIfRequested() {
 
 // runNotifier shows the notification and waits for it to be clicked,
 // dismissed, or to time out.
-func runNotifier(path string, copied bool) error {
+func runNotifier(n notification) error {
 	conn, err := dbus.ConnectSessionBus()
 	if err != nil {
 		return err
@@ -92,17 +102,15 @@ func runNotifier(path string, copied bool) error {
 	if clickable {
 		actions = []string{"default", "Open"}
 	}
-	body := filepath.Base(path)
-	if copied {
-		body += "\nCopied to the clipboard"
-	}
 	hints := map[string]dbus.Variant{
-		"image-path": dbus.MakeVariant("file://" + path), // thumbnail, where supported
-		"category":   dbus.MakeVariant("transfer.complete"),
+		"image-path": dbus.MakeVariant("file://" + n.image), // thumbnail, where supported
+	}
+	if n.category != "" {
+		hints["category"] = dbus.MakeVariant(n.category)
 	}
 	var id uint32
 	err = obj.Call(notifyIface+".Notify", 0,
-		"peep", uint32(0), "camera-photo", "Screenshot saved", body, actions, hints, int32(-1),
+		"peep", uint32(0), "camera-photo", n.summary, n.body, actions, hints, int32(-1),
 	).Store(&id)
 	if err != nil || !clickable {
 		return err
@@ -123,7 +131,7 @@ func runNotifier(path string, copied bool) error {
 			case notifyIface + ".ActivationToken":
 				token, _ = sig.Body[1].(string)
 			case notifyIface + ".ActionInvoked":
-				return openFile(path, token)
+				return openFile(n.image, token)
 			case notifyIface + ".NotificationClosed":
 				return nil
 			}
@@ -137,7 +145,7 @@ func runNotifier(path string, copied bool) error {
 func openFile(path, activationToken string) error {
 	cmd := exec.Command("xdg-open", path)
 	env := slices.DeleteFunc(os.Environ(), func(kv string) bool {
-		return strings.HasPrefix(kv, notifyEnv+"=") || strings.HasPrefix(kv, notifyCopiedEnv+"=")
+		return strings.HasPrefix(kv, "PEEP_NOTIFY_")
 	})
 	if activationToken != "" {
 		env = append(env, "XDG_ACTIVATION_TOKEN="+activationToken, "DESKTOP_STARTUP_ID="+activationToken)
