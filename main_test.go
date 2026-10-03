@@ -4,6 +4,7 @@ import (
 	"math"
 	"net/url"
 	"testing"
+	"time"
 
 	"github.com/Zyko0/go-sdl3/sdl"
 )
@@ -20,14 +21,14 @@ func TestBuildURL(t *testing.T) {
 	}{
 		{
 			name:       "no credentials, default port",
-			cfg:        config{host: "10.0.0.5", port: 554, name: "live/ch0"},
+			cfg:        config{host: "10.0.0.5", port: 554, stream: "live/ch0"},
 			wantHost:   "10.0.0.5:554",
 			wantPath:   "/live/ch0",
 			wantNoUser: true,
 		},
 		{
 			name:     "credentials and non-default port",
-			cfg:      config{host: "camera.local", port: 8554, user: "admin", pass: "secret", name: "Stream1"},
+			cfg:      config{host: "camera.local", port: 8554, user: "admin", pass: "secret", stream: "Stream1"},
 			wantHost: "camera.local:8554",
 			wantPath: "/Stream1",
 			wantUser: "admin",
@@ -35,7 +36,7 @@ func TestBuildURL(t *testing.T) {
 		},
 		{
 			name:     "credentials with url-significant characters",
-			cfg:      config{host: "192.168.1.50", port: 554, user: "a@b", pass: "p@ss:w/rd?%#", name: "h264Preview_01_main"},
+			cfg:      config{host: "192.168.1.50", port: 554, user: "a@b", pass: "p@ss:w/rd?%#", stream: "h264Preview_01_main"},
 			wantHost: "192.168.1.50:554",
 			wantPath: "/h264Preview_01_main",
 			wantUser: "a@b",
@@ -43,14 +44,14 @@ func TestBuildURL(t *testing.T) {
 		},
 		{
 			name:       "leading slash in name is not doubled",
-			cfg:        config{host: "cam", port: 554, name: "/live"},
+			cfg:        config{host: "cam", port: 554, stream: "/live"},
 			wantHost:   "cam:554",
 			wantPath:   "/live",
 			wantNoUser: true,
 		},
 		{
 			name:       "spaces in name are escaped",
-			cfg:        config{host: "cam", port: 554, name: "front door"},
+			cfg:        config{host: "cam", port: 554, stream: "front door"},
 			wantHost:   "cam:554",
 			wantPath:   "/front door",
 			wantNoUser: true,
@@ -88,6 +89,19 @@ func TestBuildURL(t *testing.T) {
 				t.Errorf("password = %q, want %q", got, tt.wantPass)
 			}
 		})
+	}
+}
+
+func TestParseArgs(t *testing.T) {
+	cfg, err := parseArgs([]string{"frontdoor", "-stats", "-buffer", "0"})
+	if err != nil || cfg.camera != "frontdoor" || !cfg.stats || cfg.buffer != 0 {
+		t.Fatalf("parseArgs = %+v, %v", cfg, err)
+	}
+	if cfg, err := parseArgs(nil); err != nil || cfg.camera != "" || cfg.buffer != 250*time.Millisecond {
+		t.Fatalf("parseArgs(nil) = %+v, %v; want no camera and default buffer", cfg, err)
+	}
+	if _, err := parseArgs([]string{"a", "b"}); err == nil {
+		t.Fatal("two camera names accepted")
 	}
 }
 

@@ -58,20 +58,37 @@ func parseHost(s string) (string, int, error) {
 	return host, port, nil
 }
 
-// savedCamera is a camera that was opened successfully. Passwords never go
-// in the cameras file: when RememberPassword is set, the password is in the
-// system keyring under keyringService and keyringUser.
+// savedCamera is a camera that was opened successfully, known by its Name.
+// Passwords never go in the cameras file: when RememberPassword is set, the
+// password is in the system keyring under keyringService and keyringUser.
 type savedCamera struct {
+	Name             string    `json:"name"`
 	Host             string    `json:"host"`
 	Port             int       `json:"port"`
 	User             string    `json:"user,omitempty"`
-	Name             string    `json:"name"`
+	Stream           string    `json:"stream"`
 	RememberPassword bool      `json:"remember_password,omitempty"`
 	LastUsed         time.Time `json:"last_used"`
 }
 
-func (c savedCamera) sameAs(o savedCamera) bool {
-	return c.Host == o.Host && c.Port == o.Port && c.User == o.User && c.Name == o.Name
+// is reports whether the camera is called name, ignoring case.
+func (c savedCamera) is(name string) bool { return strings.EqualFold(c.Name, name) }
+
+// validCameraName checks a name for a new camera, or for renaming the
+// camera currently called except.
+func validCameraName(name string, cams []savedCamera, except string) error {
+	switch {
+	case name == "":
+		return errors.New("a camera name is required, e.g. frontdoor")
+	case strings.HasPrefix(name, "-"):
+		return errors.New("camera names can't start with '-'")
+	}
+	for _, c := range cams {
+		if c.is(name) && !c.is(except) {
+			return fmt.Errorf("a camera named %q already exists", c.Name)
+		}
+	}
+	return nil
 }
 
 // addr renders host[:port] in the form parseHost accepts, leaving out the
@@ -83,16 +100,25 @@ func (c savedCamera) addr() string {
 	return c.Host
 }
 
-// label renders the camera as [user@]host[:port]/name.
+// addrOrEmpty is addr, or "" for a camera with no host yet.
+func (c savedCamera) addrOrEmpty() string {
+	if c.Host == "" {
+		return ""
+	}
+	return c.addr()
+}
+
+// label renders the camera's connection as [user@]host[:port]/stream.
 func (c savedCamera) label() string {
 	addr := c.addr()
 	if c.User != "" {
 		addr = c.User + "@" + addr
 	}
-	return addr + "/" + strings.TrimPrefix(c.Name, "/")
+	return addr + "/" + strings.TrimPrefix(c.Stream, "/")
 }
 
-// keyringUser is the account name the camera's password is stored under.
+// keyringUser is the account name the camera's password is stored under. It
+// is the connection rather than the name, so renaming keeps the password.
 func (c savedCamera) keyringUser() string { return c.label() }
 
 // storedPassword fetches the camera's password from the system keyring.
@@ -110,12 +136,12 @@ func (c savedCamera) dropPassword() error {
 }
 
 func (c savedCamera) config(base config) config {
-	base.host, base.port, base.user, base.name = c.Host, c.Port, c.User, c.Name
+	base.camera, base.host, base.port, base.user, base.stream = c.Name, c.Host, c.Port, c.User, c.Stream
 	return base
 }
 
 func cameraFromConfig(cfg config) savedCamera {
-	return savedCamera{Host: cfg.host, Port: cfg.port, User: cfg.user, Name: cfg.name}
+	return savedCamera{Name: cfg.camera, Host: cfg.host, Port: cfg.port, User: cfg.user, Stream: cfg.stream}
 }
 
 // camerasPath is where previously opened cameras are remembered.
@@ -141,7 +167,24 @@ func loadCameras(path string) ([]savedCamera, error) {
 	if err := json.Unmarshal(b, &cams); err != nil {
 		return nil, fmt.Errorf("parsing %s: %w", path, err)
 	}
+	migrateCameras(cams)
 	return cams, nil
+}
+
+// migrateCameras upgrades entries saved before cameras had names, when
+// "name" held the stream path, naming each after its host.
+func migrateCameras(cams []savedCamera) {
+	for i := range cams {
+		if cams[i].Stream != "" || cams[i].Name == "" {
+			continue
+		}
+		cams[i].Stream, cams[i].Name = cams[i].Name, ""
+		name := cams[i].Host
+		for n := 2; validCameraName(name, cams, "") != nil; n++ {
+			name = fmt.Sprintf("%s-%d", cams[i].Host, n)
+		}
+		cams[i].Name = name
+	}
 }
 
 // saveCameras atomically replaces the saved camera list.
@@ -168,33 +211,34 @@ func saveCameras(path string, cams []savedCamera) error {
 	return os.Rename(tmp.Name(), path)
 }
 
-// rememberCamera moves cam to the front of cams, dropping any older copy and
-// trimming the list to maxSavedCams.
-func rememberCamera(cams []savedCamera, cam savedCamera) []savedCamera {
+// rememberCamera moves cam to the front of cams, replacing the camera of the
+// same name, or the one called replaces when it was renamed, and trims the
+// list to maxSavedCams.
+func rememberCamera(cams []savedCamera, cam savedCamera, replaces string) []savedCamera {
 	out := []savedCamera{cam}
 	for _, c := range cams {
-		if !c.sameAs(cam) && len(out) < maxSavedCams {
+		if !c.is(cam.Name) && !(replaces != "" && c.is(replaces)) && len(out) < maxSavedCams {
 			out = append(out, c)
 		}
 	}
 	return out
 }
 
-// forgetCamera removes cam from cams.
-func forgetCamera(cams []savedCamera, cam savedCamera) []savedCamera {
+// forgetCamera removes the camera called name from cams.
+func forgetCamera(cams []savedCamera, name string) []savedCamera {
 	var out []savedCamera
 	for _, c := range cams {
-		if !c.sameAs(cam) {
+		if !c.is(name) {
 			out = append(out, c)
 		}
 	}
 	return out
 }
 
-// findCamera returns the saved entry matching cam, if any.
-func findCamera(cams []savedCamera, cam savedCamera) (savedCamera, bool) {
+// findCamera returns the camera called name, if any.
+func findCamera(cams []savedCamera, name string) (savedCamera, bool) {
 	for _, c := range cams {
-		if c.sameAs(cam) {
+		if c.is(name) {
 			return c, true
 		}
 	}
@@ -214,42 +258,32 @@ func recordOpened(cfg config) error {
 	}
 	cam := cameraFromConfig(cfg)
 	cam.LastUsed = time.Now()
-	if prev, ok := findCamera(cams, cam); ok {
-		cam.RememberPassword = prev.RememberPassword
+	prevName := cfg.replaces
+	if prevName == "" {
+		prevName = cam.Name
 	}
 	var keyErr error
+	if prev, ok := findCamera(cams, prevName); ok && prev.RememberPassword {
+		if prev.keyringUser() == cam.keyringUser() {
+			cam.RememberPassword = true
+		} else if err := prev.dropPassword(); err != nil {
+			// The connection changed, so the old password no longer applies.
+			keyErr = fmt.Errorf("removing old password from keyring: %w", err)
+		}
+	}
 	switch {
 	case cfg.passChoice == passRemember && cfg.user != "":
-		if keyErr = keyring.Set(keyringService, cam.keyringUser(), cfg.pass); keyErr == nil {
+		if err := keyring.Set(keyringService, cam.keyringUser(), cfg.pass); err == nil {
 			cam.RememberPassword = true
 		} else {
-			keyErr = fmt.Errorf("saving password to keyring: %w", keyErr)
+			keyErr = errors.Join(keyErr, fmt.Errorf("saving password to keyring: %w", err))
 		}
 	case cfg.passChoice == passForget && cam.RememberPassword:
-		if keyErr = cam.dropPassword(); keyErr == nil {
+		if err := cam.dropPassword(); err == nil {
 			cam.RememberPassword = false
 		} else {
-			keyErr = fmt.Errorf("removing password from keyring: %w", keyErr)
+			keyErr = errors.Join(keyErr, fmt.Errorf("removing password from keyring: %w", err))
 		}
 	}
-	return errors.Join(keyErr, saveCameras(path, rememberCamera(cams, cam)))
-}
-
-// rememberedPassword looks up the keyring password for cfg's camera, if it
-// was saved with one.
-func rememberedPassword(cfg config) (string, bool) {
-	path, err := camerasPath()
-	if err != nil {
-		return "", false
-	}
-	cams, err := loadCameras(path)
-	if err != nil {
-		return "", false
-	}
-	cam, ok := findCamera(cams, cameraFromConfig(cfg))
-	if !ok || !cam.RememberPassword {
-		return "", false
-	}
-	pass, err := cam.storedPassword()
-	return pass, err == nil
+	return errors.Join(keyErr, saveCameras(path, rememberCamera(cams, cam, cfg.replaces)))
 }

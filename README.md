@@ -61,17 +61,24 @@ go install github.com/speersj/peep@latest
 
 ## Running
 
-Run `peep` with no host to open the interactive picker:
-
 ```sh
-peep
+peep [flags] [camera]
 ```
 
-The picker lists cameras you have opened before, newest first, along with an
-option to add a new one. Picking "New camera" starts a short wizard that asks
-for the host, stream name, username and password.
+Cameras are saved under a name you choose, such as `frontdoor`.
 
-| Key           | In the picker                     |
+- **`peep frontdoor`** connects to the saved camera called `frontdoor`
+  (names are not case-sensitive):
+  - If the camera has no username, or its password is saved in the keyring,
+    it connects straight away.
+  - Otherwise peep asks for the password, then offers to remember it.
+  - If there is no camera called `frontdoor`, a short wizard adds one under
+    that name. It asks for the host, stream path, and optionally a username
+    and password.
+- **`peep`** with no name lists the saved cameras, newest first, along with
+  an option to add a new one.
+
+| Key           | In the camera list                |
 | ------------- | --------------------------------- |
 | ↑ / ↓, j / k  | move                              |
 | enter         | connect                           |
@@ -79,31 +86,20 @@ for the host, stream name, username and password.
 | d             | forget the selected camera        |
 | q / esc       | quit                              |
 
-To skip the picker, give the connection on the command line:
-
-```sh
-peep -n live/ch0 camera.local
-peep -u admin -n Stream1 192.168.1.50:8554
-peep -u admin -n live [fe80::1]:554
-```
-
-The host can include a port (`host:port`, with `[addr]:port` for IPv6). If it
-does not, the port defaults to **554**. When `-user` is set without
-`-password`, peep uses the password saved in the keyring if there is one, and
-otherwise asks for it without echoing it.
+In the wizard, enter moves to the next step and esc goes back. The host can
+include a port (`host:port`, with `[addr]:port` for IPv6). If it does not, the
+port defaults to **554**.
 
 ### Flags
 
-| Flag                 | Default | Description                                                         |
-| -------------------- | ------- | ------------------------------------------------------------------- |
-| `-name`, `-n`        |         | RTSP stream path, e.g. `live/ch0`. Required with a host.            |
-| `-user`, `-u`        |         | RTSP username.                                                      |
-| `-password`, `-pw`   |         | RTSP password. Avoid this flag: the password ends up in your shell history. |
-| `-buffer`            | `250ms` | Playback delay that smooths out network jitter; `0` for the lowest latency. |
-| `-hwaccel`           | `auto`  | ffmpeg hardware decoder, e.g. `vaapi` or `cuda`; `none` to disable. |
-| `-stats`             | off     | Print playback statistics and ffmpeg warnings to stderr every second. |
+| Flag       | Default | Description                                                                  |
+| ---------- | ------- | ---------------------------------------------------------------------------- |
+| `-buffer`  | `250ms` | Playback delay that smooths out network jitter; `0` for the lowest latency.  |
+| `-hwaccel` | `auto`  | ffmpeg hardware decoder, e.g. `vaapi` or `cuda`; `none` to disable.          |
+| `-stats`   | off     | Print playback statistics and ffmpeg warnings to stderr every second.        |
 
-Flags and the host can be given in any order.
+Flags and the camera name can be given in any order, e.g.
+`peep frontdoor -buffer 0`.
 
 ### In the video window
 
@@ -130,16 +126,24 @@ window rules.
 
 ## Saved cameras and passwords
 
-Each camera that opens successfully is remembered in
-`~/.config/peep/cameras.json` (or the platform's equivalent config directory).
-peep keeps the 20 most recently used.
+A camera is saved in `~/.config/peep/cameras.json` (or the platform's
+equivalent config directory) once it first connects successfully, so a
+mistyped host is never saved. peep keeps the 20 most recently used. Cameras
+saved by older versions of peep, which had no names, are named after their
+host. Press `e` in the list to rename one.
 
-Passwords are never written to that file. After you type a password in the
-picker, peep asks whether to remember it. If you say yes, the password is
-stored in the system keyring once the camera connects, and that camera then
-connects without asking. To change a saved password, select the camera, press
-`e`, enter the new password and answer `y`. Answering `n`, or forgetting the
-camera with `d`, removes the saved password from the keyring.
+Passwords are never written to that file. After you type a password, peep asks
+whether to remember it. If you say yes, the password is stored in the system
+keyring once the camera connects, and from then on that camera connects
+without asking.
+
+- **Changing a saved password:** select the camera, press `e`, enter the new
+  password and answer `y`.
+- **Removing a saved password:** answer `n` when asked to remember a newly
+  entered password.
+- **Forgetting a camera** with `d` also removes its saved password.
+- **Renaming a camera** keeps its saved password. Changing its host, port,
+  username or stream path removes the saved password.
 
 ## Development
 

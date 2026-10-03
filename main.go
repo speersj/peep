@@ -8,7 +8,6 @@
 package main
 
 import (
-	"bufio"
 	"context"
 	"errors"
 	"flag"
@@ -27,7 +26,6 @@ import (
 	"time"
 
 	"github.com/Zyko0/go-sdl3/sdl"
-	"golang.org/x/term"
 )
 
 const (
@@ -40,13 +38,15 @@ const (
 )
 
 type config struct {
-	host string
-	user string
-	pass string
-	port int
-	name string
+	camera string // the camera's name
+	host   string
+	user   string
+	pass   string
+	port   int
+	stream string // RTSP stream path, e.g. "live/ch0"
 
 	passChoice passChoice // what to do with pass in the keyring once opened
+	replaces   string     // the camera's previous name, when it was renamed
 
 	buffer  time.Duration
 	hwaccel string
@@ -67,15 +67,13 @@ func main() {
 		fmt.Fprintf(os.Stderr, "peep: %v\nrun 'peep -h' for usage\n", err)
 		os.Exit(2)
 	}
-	if cfg.host == "" {
-		cfg, err = pickCamera(cfg)
-		if errors.Is(err, errCanceled) {
-			return
-		}
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "peep: %v\n", err)
-			os.Exit(1)
-		}
+	cfg, err = pickCamera(cfg)
+	if errors.Is(err, errCanceled) {
+		return
+	}
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "peep: %v\n", err)
+		os.Exit(1)
 	}
 	if err := run(cfg); err != nil {
 		fmt.Fprintf(os.Stderr, "peep: %v\n", err)
@@ -86,22 +84,17 @@ func main() {
 func parseArgs(args []string) (config, error) {
 	var cfg config
 	fs := flag.NewFlagSet("peep", flag.ExitOnError)
-	fs.StringVar(&cfg.user, "user", "", "RTSP username (optional)")
-	fs.StringVar(&cfg.user, "u", "", "RTSP username (shorthand)")
-	fs.StringVar(&cfg.pass, "password", "", "RTSP password (when -user is set and this is empty, the keyring is tried, then a prompt)")
-	fs.StringVar(&cfg.pass, "pw", "", "RTSP password (shorthand)")
-	fs.StringVar(&cfg.name, "name", "", "RTSP stream name/path, e.g. \"live/ch0\"")
-	fs.StringVar(&cfg.name, "n", "", "RTSP stream name/path (shorthand)")
 	fs.DurationVar(&cfg.buffer, "buffer", 250*time.Millisecond, "playback delay used to smooth out network jitter (0 for lowest latency)")
 	fs.StringVar(&cfg.hwaccel, "hwaccel", "auto", "ffmpeg hardware decoding method, e.g. auto, vaapi, cuda; \"none\" to disable")
 	fs.BoolVar(&cfg.stats, "stats", false, "print playback statistics to stderr once a second")
 	fs.Usage = func() {
-		fmt.Fprintf(fs.Output(), "Usage: peep [flags] [<host>[:port]]\n\n"+
-			"Displays a live RTSP feed; ESC or q quits. Space or a click\n"+
-			"saves a screenshot to ~/Pictures and copies it to the clipboard.\n"+
-			"The port defaults to %d.\n"+
-			"Without a host, an interactive picker offers previously opened\n"+
-			"cameras or walks through entering a new one.\n\n", defaultPort)
+		fmt.Fprintf(fs.Output(), "Usage: peep [flags] [camera]\n\n"+
+			"Displays a live RTSP camera feed; ESC or q quits. Space or a\n"+
+			"click saves a screenshot to ~/Pictures and copies it to the\n"+
+			"clipboard.\n\n"+
+			"With a camera name, peep connects to that saved camera, asking\n"+
+			"for its password unless one is saved; an unknown name starts a\n"+
+			"wizard to add it. Without one, it lists the saved cameras.\n\n")
 		fs.PrintDefaults()
 	}
 	fs.Parse(normalizeArgs(args)) // ExitOnError: exits on bad flags or -h
@@ -110,33 +103,13 @@ func parseArgs(args []string) (config, error) {
 		return cfg, fmt.Errorf("-buffer out of range: %v", cfg.buffer)
 	}
 	if fs.NArg() > 1 {
-		return cfg, errors.New("at most one <host> argument is allowed")
+		return cfg, errors.New("at most one camera name is allowed")
 	}
-	if fs.NArg() == 0 {
-		return cfg, nil // no host: the interactive picker fills in the rest
-	}
-	var err error
-	if cfg.host, cfg.port, err = parseHost(fs.Arg(0)); err != nil {
-		return cfg, err
-	}
-	if cfg.name == "" {
-		return cfg, errors.New("-name is required, e.g. -n live/ch0")
-	}
-	if cfg.user != "" && cfg.pass == "" {
-		if pass, ok := rememberedPassword(cfg); ok {
-			cfg.pass = pass
-			return cfg, nil
-		}
-		pass, err := promptPassword()
-		if err != nil {
-			return cfg, err
-		}
-		cfg.pass = pass
-	}
+	cfg.camera = strings.TrimSpace(fs.Arg(0))
 	return cfg, nil
 }
 
-// normalizeArgs lets the positional <host> appear before, between, or after
+// normalizeArgs lets the positional camera name appear before, between, or after
 // flags by moving every non-flag argument to the end, where flag.Parse
 // expects it. The token following a flag is carried along with it as its
 // value, except for the boolean flags in boolFlags.
@@ -162,32 +135,13 @@ func normalizeArgs(args []string) []string {
 	return append(flags, positional...)
 }
 
-// promptPassword reads the RTSP password from the terminal without echo, or
-// from stdin when it is not a terminal.
-func promptPassword() (string, error) {
-	if term.IsTerminal(int(os.Stdin.Fd())) {
-		fmt.Fprint(os.Stderr, "RTSP password: ")
-		b, err := term.ReadPassword(int(os.Stdin.Fd()))
-		fmt.Fprintln(os.Stderr)
-		if err != nil {
-			return "", fmt.Errorf("reading password: %w", err)
-		}
-		return string(b), nil
-	}
-	line, err := bufio.NewReader(os.Stdin).ReadString('\n')
-	if err != nil && !errors.Is(err, io.EOF) {
-		return "", fmt.Errorf("reading password: %w", err)
-	}
-	return strings.TrimRight(line, "\r\n"), nil
-}
-
-// buildURL renders rtsp://user:password@host:port/name, escaping credentials
+// buildURL renders rtsp://user:password@host:port/stream, escaping credentials
 // and the stream path safely.
 func buildURL(cfg config) string {
 	u := url.URL{
 		Scheme: "rtsp",
 		Host:   net.JoinHostPort(cfg.host, strconv.Itoa(cfg.port)),
-		Path:   "/" + strings.TrimPrefix(cfg.name, "/"),
+		Path:   "/" + strings.TrimPrefix(cfg.stream, "/"),
 	}
 	if cfg.user != "" {
 		u.User = url.UserPassword(cfg.user, cfg.pass)
@@ -338,7 +292,7 @@ func run(cfg config) error {
 	}
 	defer quitSDL()
 	winW, winH := fitWindow(geom.width, geom.height, maxWindowW, maxWindowH)
-	window, err := sdl.CreateWindow("peep - "+cameraFromConfig(cfg).label(), winW, winH,
+	window, err := sdl.CreateWindow("peep - "+cfg.camera, winW, winH,
 		sdl.WINDOW_RESIZABLE|sdl.WINDOW_HIGH_PIXEL_DENSITY)
 	if err != nil {
 		return fmt.Errorf("creating window: %w", err)
