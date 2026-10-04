@@ -4,6 +4,7 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"slices"
@@ -47,12 +48,21 @@ func notifyImage(n notification) error {
 		notifyBodyEnv+"="+n.body,
 		notifyCategoryEnv+"="+n.category,
 	)
-	cmd.Stderr = os.Stderr
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true} // survive the terminal closing
+	// Relay its errors through a pipe rather than handing it peep's stderr,
+	// which it would hold open after peep exits, stalling a pipeline such
+	// as peep 2>&1 | tee log.
+	errs, err := cmd.StderrPipe()
+	if err != nil {
+		return err
+	}
 	if err := cmd.Start(); err != nil {
 		return err
 	}
-	go cmd.Wait() // reap it if it exits while peep is still running
+	go func() {
+		io.Copy(os.Stderr, errs)
+		cmd.Wait() // reap it if it exits while peep is still running
+	}()
 	return nil
 }
 

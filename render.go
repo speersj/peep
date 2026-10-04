@@ -68,6 +68,7 @@ type player struct {
 	matrix     yuvMatrix
 
 	detLoading chan detectorResult // a detector being started, or nil
+	detToggled bool                // detLoading was started by the t key
 
 	toast      string // brief message shown over the video
 	toastUntil time.Time
@@ -222,6 +223,14 @@ func (p *player) update(now time.Time) error {
 			return fmt.Errorf("uploading frame: %w", err)
 		}
 		p.hasFrame = true
+	} else if f := p.sched.newest(); f != nil && !p.hasFrame {
+		// Until the first frame is due, show the newest one received
+		// rather than a black window. It stays queued, so playback is
+		// unaffected.
+		if err := p.uploadFrame(f.buf); err != nil {
+			return fmt.Errorf("uploading frame: %w", err)
+		}
+		p.hasFrame = true
 	}
 	if p.stats {
 		p.printStats(now)
@@ -293,18 +302,25 @@ func (p *player) toggleDetection() {
 		p.showToast("Detection off", now)
 		p.saveDetect(false)
 	default:
-		ch := make(chan detectorResult, 1)
-		p.detLoading = ch
-		camera, geom, matrix := p.camera, p.geom, p.matrix
-		go func() {
-			det, err := newDetector(camera, geom, matrix)
-			ch <- detectorResult{det, err}
-		}()
+		p.startDetector(true)
 		p.showToast("Starting detection...", now)
 	}
 }
 
-// pollDetector picks up a detector started by toggleDetection.
+// startDetector starts a detector in the background, for pollDetector to
+// pick up. toggled says the user turned detection on, which is announced
+// and saved, rather than it being on for the camera already.
+func (p *player) startDetector(toggled bool) {
+	ch := make(chan detectorResult, 1)
+	p.detLoading, p.detToggled = ch, toggled
+	camera, geom, matrix := p.camera, p.geom, p.matrix
+	go func() {
+		det, err := newDetector(camera, geom, matrix)
+		ch <- detectorResult{det, err}
+	}()
+}
+
+// pollDetector picks up a detector started by startDetector.
 func (p *player) pollDetector(now time.Time) {
 	if p.detLoading == nil {
 		return
@@ -318,8 +334,10 @@ func (p *player) pollDetector(now time.Time) {
 			return
 		}
 		p.det = res.det
-		p.showToast("Detection on", now)
-		p.saveDetect(true)
+		if p.detToggled {
+			p.showToast("Detection on", now)
+			p.saveDetect(true)
+		}
 	default:
 	}
 }

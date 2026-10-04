@@ -18,7 +18,7 @@ const (
 	// rateWindow is how many recent arrivals the frame rate is measured
 	// over, and rateMinSpan how long they must span before being trusted.
 	rateWindow  = 100
-	rateMinSpan = 3 * time.Second
+	rateMinSpan = time.Second
 	// rateWarmup ignores arrivals right after connecting, when ffmpeg may
 	// deliver a burst of frames that would skew the measured rate.
 	rateWarmup = time.Second
@@ -117,6 +117,15 @@ func (s *scheduler) add(f *frame) {
 		s.dropped++
 	}
 	s.pending = append(s.pending, f)
+}
+
+// newest returns the most recently received frame that is still queued, or
+// nil. It stays queued, and its buffer still belongs to the scheduler.
+func (s *scheduler) newest() *frame {
+	if len(s.pending) == 0 {
+		return nil
+	}
+	return s.pending[len(s.pending)-1]
 }
 
 func (s *scheduler) flush() {

@@ -156,27 +156,48 @@ type streamInfo struct {
 	width, height int
 	fps           float64 // 0 when unknown
 	colorSpace    string
-	fullRange     bool // full ("pc"/JPEG) rather than limited colour range
+	fullRange     bool   // full ("pc"/JPEG) rather than limited colour range
+	pixFmt        string // decoded pixel format, e.g. yuv420p
 }
+
+// quickProbe makes ffprobe and ffmpeg read only the stream's description
+// from the RTSP server, which usually holds everything needed to decode it,
+// instead of analysing about two seconds of video first.
+var quickProbe = []string{"-probesize", "32", "-analyzeduration", "0"}
 
 // probeStream asks ffprobe for the video size, frame rate and colour space
 // so the window and buffers can be set up before the first frame arrives.
 // ffprobe disconnects before ffmpeg connects, which keeps cameras that allow
 // a single RTSP session happy.
-func probeStream(ctx context.Context, streamURL string) (streamInfo, error) {
+//
+// It tries a quick probe first; quick reports whether that was enough, in
+// which case ffmpeg can open the stream with quickProbe too. A quick probe
+// often lacks the average frame rate, but the scheduler measures it anyway.
+func probeStream(ctx context.Context, streamURL string) (info streamInfo, quick bool, err error) {
+	info, err = runProbe(ctx, streamURL, quickProbe)
+	if err == nil && info.pixFmt != "" && info.pixFmt != "unknown" {
+		return info, true, nil
+	}
+	if ctx.Err() != nil {
+		return info, false, err
+	}
+	info, err = runProbe(ctx, streamURL, []string{"-analyzeduration", "1000000"})
+	return info, false, err
+}
+
+func runProbe(ctx context.Context, streamURL string, opts []string) (streamInfo, error) {
 	ctx, cancel := context.WithTimeout(ctx, probeTimeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "ffprobe",
-		"-v", "error",
-		"-rtsp_transport", "tcp",
-		"-analyzeduration", "1000000",
+	args := []string{"-v", "error", "-rtsp_transport", "tcp"}
+	args = append(args, opts...)
+	args = append(args,
 		"-select_streams", "v:0",
 		"-show_entries", "stream=width,height,avg_frame_rate,r_frame_rate,color_space,color_range,pix_fmt",
 		"-of", "default=noprint_wrappers=1",
 		streamURL,
 	)
-	out, err := cmd.Output()
+	out, err := exec.CommandContext(ctx, "ffprobe", args...).Output()
 	if err != nil {
 		if ctx.Err() != nil {
 			return streamInfo{}, fmt.Errorf("probing stream: %w", ctx.Err())
@@ -217,6 +238,7 @@ func parseProbe(out string) (streamInfo, error) {
 		case "color_range":
 			info.fullRange = info.fullRange || val == "pc"
 		case "pix_fmt":
+			info.pixFmt = val
 			info.fullRange = info.fullRange || strings.HasPrefix(val, "yuvj")
 		}
 	}
@@ -259,7 +281,12 @@ func run(cfg config) error {
 	defer stopSignals()
 
 	streamURL := buildURL(cfg)
-	info, err := probeStream(ctx, streamURL)
+	// Checking for VA-API takes a moment, so do it while probing.
+	vaapiCh := make(chan bool, 1)
+	go func() {
+		vaapiCh <- (cfg.hwaccel == "auto" || cfg.hwaccel == "vaapi") && vaapiAvailable(ctx)
+	}()
+	info, quick, err := probeStream(ctx, streamURL)
 	if err != nil {
 		return err
 	}
@@ -277,19 +304,29 @@ func run(cfg config) error {
 		// handles latency, and both can make the decoder lose frames on
 		// streams with B-frames.
 		"-rtsp_transport", "tcp",
-		"-analyzeduration", "0",
+		// Frame threading holds back a frame per decoding thread, which
+		// adds more than half a second of latency on a many-core machine.
+		// Slice threading adds none.
+		"-thread_type", "slice",
+	}
+	if quick {
+		input = append(input, quickProbe...)
+	} else {
+		input = append(input, "-analyzeduration", "0")
+	}
+	input = append(input,
 		// Keep decoded frames at the coded resolution so they always match
 		// the dimensions ffprobe reported, even for rotated streams.
 		"-noautorotate",
 		"-i", streamURL,
-	}
+	)
 	var ffmpegLog io.Writer
 	if cfg.stats {
 		ffmpegLog = os.Stderr
 	}
 	// scale_vaapi does not convert full-range video to limited range, so
 	// such streams are decoded in software.
-	vaapiOK := (cfg.hwaccel == "auto" || cfg.hwaccel == "vaapi") && !info.fullRange && vaapiAvailable(ctx)
+	vaapiOK := <-vaapiCh && !info.fullRange
 	st, dec, err := startDecoding(ctx, input, decoders(cfg.hwaccel, geom, vaapiOK), geom.frameLen(), pool, ffmpegLog)
 	if err != nil {
 		return err
@@ -300,13 +337,6 @@ func run(cfg config) error {
 		fmt.Fprintf(os.Stderr, "peep: decoding with %s\n", dec.name)
 	}
 
-	var det *detector
-	if cfg.detect {
-		// Before the window opens, as the first run downloads the model.
-		if det, err = newDetector(cfg.camera, geom, streamMatrix(info.colorSpace)); err != nil {
-			fmt.Fprintf(os.Stderr, "peep: detection is off: %v\n", err)
-		}
-	}
 	quitSDL, err := initSDL()
 	if err != nil {
 		return err
@@ -327,13 +357,15 @@ func run(cfg config) error {
 		geom:       geom,
 		colorspace: streamColorspace(info.colorSpace),
 		stats:      cfg.stats,
-		det:        det,
 		camera:     cfg.camera,
 		matrix:     streamMatrix(info.colorSpace),
 	}
 	defer p.destroy()
 	if err := p.newRenderer(window); err != nil {
 		return err
+	}
+	if cfg.detect {
+		p.startDetector(false) // in the background, as it may download the model
 	}
 	err = p.loop()
 	p.saving.Wait() // let screenshots in progress finish writing

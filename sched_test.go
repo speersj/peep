@@ -2,6 +2,7 @@ package main
 
 import (
 	"math/rand"
+	"slices"
 	"testing"
 	"time"
 )
@@ -182,5 +183,34 @@ func TestSchedulerDropsOldestWhenFull(t *testing.T) {
 	}
 	if len(h.s.pending) != 3 || h.s.dropped != 2 || h.released != 2 {
 		t.Errorf("pending=%d dropped=%d released=%d", len(h.s.pending), h.s.dropped, h.released)
+	}
+}
+
+// A wrong guess at the frame rate must be corrected soon after connecting,
+// as the quick probe usually leaves only r_frame_rate to go on.
+func TestSchedulerMeasuresFrameRateQuickly(t *testing.T) {
+	h := newHarness(t, 250*time.Millisecond, 40, 64)
+	for i := range 50 { // 2.5s
+		h.arrive(epoch.Add(ms(float64(i) * 50)))
+	}
+	if got := h.s.interval; got < ms(49) || got > ms(51) {
+		t.Errorf("interval after 2.5s %v; want 50ms", got)
+	}
+}
+
+// newest shows the latest frame without taking it from the queue.
+func TestSchedulerNewest(t *testing.T) {
+	h := newHarness(t, 250*time.Millisecond, 20, 64)
+	if h.s.newest() != nil {
+		t.Fatal("newest of an empty queue is not nil")
+	}
+	h.arrive(epoch)
+	h.arrive(epoch.Add(ms(50)))
+	if f := h.s.newest(); f == nil || f.buf[1] != 1 {
+		t.Fatalf("newest = %v; want frame 1", f)
+	}
+	h.runUntil(epoch.Add(time.Second))
+	if !slices.Equal(h.shown, []int{0, 1}) {
+		t.Errorf("shown %v; want [0 1]", h.shown)
 	}
 }
