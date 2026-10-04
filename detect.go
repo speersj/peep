@@ -18,6 +18,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	ort "github.com/shota3506/onnxruntime-purego/onnxruntime"
@@ -123,6 +124,7 @@ func (d detection) label() string {
 // so playback never waits for it.
 type detector struct {
 	camera string
+	quiet  atomic.Bool // save detections without notifying
 	geom   frameGeom
 	matrix yuvMatrix
 
@@ -482,8 +484,8 @@ func (t *tracker) updateSpots(dets []detection, now time.Time) {
 	}
 }
 
-// announce saves the frame with its boxes and shows a notification that
-// class was detected.
+// announce saves the frame with its boxes and, unless quiet, shows a
+// notification that class was detected.
 func (d *detector) announce(frame []byte, class int, dets []detection, now time.Time) {
 	var best float32
 	count := 0
@@ -505,6 +507,9 @@ func (d *detector) announce(frame []byte, class int, dets []detection, now time.
 	}
 	body := fmt.Sprintf("%s · %s · %.0f%% confident", d.camera, now.Format("15:04:05"), best*100)
 	fmt.Fprintf(os.Stderr, "peep: %s (%s)\n", strings.ToLower(summary), path)
+	if d.quiet.Load() {
+		return
+	}
 	err = notifyImage(notification{image: path, summary: summary, body: body, category: "device"})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "peep: detection notification: %v\n", err)

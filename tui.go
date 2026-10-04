@@ -409,6 +409,9 @@ func (m pickerModel) View() tea.View {
 				note = dimStyle.Render("  " + c.label())
 				if c.Detect {
 					note += dimStyle.Render(" · detection")
+					if c.Quiet {
+						note += dimStyle.Render(" (notifications off)")
+					}
 				}
 				if c.RememberPassword {
 					note += dimStyle.Render(" · password saved")

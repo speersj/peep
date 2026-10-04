@@ -123,6 +123,7 @@ shows which decoder is in use.
 | esc, q         | quit                                                      |
 | space          | save a screenshot, copy it to the clipboard and notify    |
 | t              | turn detection on or off for this camera (saved)          |
+| n              | turn detection notifications off or on (saved)           |
 
 Keys follow your keyboard layout, so a Caps Lock remapped to Escape (for
 example with XKB's `caps:escape`) also quits.
@@ -144,7 +145,9 @@ window rules.
 
 Detection is a per-camera setting. The wizard asks whether to turn it on when
 you add or edit a camera, `t` in the camera list toggles it for the selected
-camera, and `t` in the video window turns it on or off while you watch. Cameras with detection on are marked "detection" in the list.
+camera, and `t` in the video window turns it on or off while you watch. Cameras
+with detection on are marked "detection" in the list, with "(notifications
+off)" if you have turned those off.
 
 With detection on, peep looks for people, vehicles (bicycles, cars, motorcycles,
 buses and trucks) and animals (birds, cats, dogs, horses, sheep, cows and
@@ -158,6 +161,11 @@ The frames are saved in `~/.cache/peep/detections`. While peep runs, it
 checks that folder at startup and every 10 minutes. It deletes frames older
 than a week, and if the folder still holds more than 1 GB, it deletes the
 oldest 10% of frames until it is under that limit.
+
+Press `n` in the video window to stop the notifications while still saving
+the frames, and again to bring them back. This is saved for the camera, and
+"notifications off" shows in the top right corner while they are off.
+Screenshot notifications are not affected.
 
 To avoid repeated or false alerts:
 

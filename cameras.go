@@ -68,6 +68,7 @@ type savedCamera struct {
 	User             string    `json:"user,omitempty"`
 	Stream           string    `json:"stream"`
 	Detect           bool      `json:"detect,omitempty"` // object detection on
+	Quiet            bool      `json:"quiet,omitempty"`  // no notifications for detections
 	OldModel         string    `json:"model,omitempty"`  // briefly, a choice of detection model
 	RememberPassword bool      `json:"remember_password,omitempty"`
 	LastUsed         time.Time `json:"last_used"`
@@ -139,12 +140,12 @@ func (c savedCamera) dropPassword() error {
 
 func (c savedCamera) config(base config) config {
 	base.camera, base.host, base.port, base.user, base.stream = c.Name, c.Host, c.Port, c.User, c.Stream
-	base.detect = c.Detect
+	base.detect, base.quiet = c.Detect, c.Quiet
 	return base
 }
 
 func cameraFromConfig(cfg config) savedCamera {
-	return savedCamera{Name: cfg.camera, Host: cfg.host, Port: cfg.port, User: cfg.user, Stream: cfg.stream, Detect: cfg.detect}
+	return savedCamera{Name: cfg.camera, Host: cfg.host, Port: cfg.port, User: cfg.user, Stream: cfg.stream, Detect: cfg.detect, Quiet: cfg.quiet}
 }
 
 // camerasPath is where previously opened cameras are remembered.
@@ -255,6 +256,17 @@ func findCamera(cams []savedCamera, name string) (savedCamera, bool) {
 
 // setCameraDetect saves the detection setting of the camera called name.
 func setCameraDetect(name string, on bool) error {
+	return updateCamera(name, func(c *savedCamera) { c.Detect = on })
+}
+
+// setCameraQuiet saves whether detections of the camera called name are
+// announced with notifications.
+func setCameraQuiet(name string, quiet bool) error {
+	return updateCamera(name, func(c *savedCamera) { c.Quiet = quiet })
+}
+
+// updateCamera applies change to the saved camera called name.
+func updateCamera(name string, change func(*savedCamera)) error {
 	path, err := camerasPath()
 	if err != nil {
 		return err
@@ -265,7 +277,7 @@ func setCameraDetect(name string, on bool) error {
 	}
 	for i := range cams {
 		if cams[i].is(name) {
-			cams[i].Detect = on
+			change(&cams[i])
 			return saveCameras(path, cams)
 		}
 	}

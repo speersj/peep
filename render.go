@@ -65,6 +65,7 @@ type player struct {
 	stats      bool
 	det        *detector // nil unless detection is on
 	camera     string    // saved camera name, for toggling detection
+	quiet      bool      // detections are saved without notifications
 	matrix     yuvMatrix
 
 	detLoading chan detectorResult // a detector being started, or nil
@@ -199,6 +200,8 @@ func (p *player) handleEvents() (bool, error) {
 				p.screenshot()
 			case sdl.K_T:
 				p.toggleDetection()
+			case sdl.K_N:
+				p.toggleQuiet()
 			}
 		}
 	}
@@ -277,6 +280,9 @@ func (p *player) draw() error {
 		}
 	}
 	p.drawToast(time.Now())
+	if p.quiet {
+		p.drawBadge("notifications off", true)
+	}
 	return r.Present()
 }
 
@@ -334,6 +340,7 @@ func (p *player) pollDetector(now time.Time) {
 			return
 		}
 		p.det = res.det
+		p.det.quiet.Store(p.quiet)
 		if p.detToggled {
 			p.showToast("Detection on", now)
 			p.saveDetect(true)
@@ -352,6 +359,26 @@ func (p *player) saveDetect(on bool) {
 	}
 }
 
+// toggleQuiet turns notifications for detections off or on and saves the
+// choice. Detections are still saved either way.
+func (p *player) toggleQuiet() {
+	p.quiet = !p.quiet
+	if p.det != nil {
+		p.det.quiet.Store(p.quiet)
+	}
+	msg := "Notifications on"
+	if p.quiet {
+		msg = "Notifications off"
+	}
+	p.showToast(msg, time.Now())
+	if p.camera == "" {
+		return
+	}
+	if err := setCameraQuiet(p.camera, p.quiet); err != nil {
+		fmt.Fprintf(os.Stderr, "peep: saving notification setting: %v\n", err)
+	}
+}
+
 const toastTime = 2 * time.Second
 
 func (p *player) showToast(msg string, now time.Time) {
@@ -366,17 +393,48 @@ func (p *player) drawToast(now time.Time) {
 	if p.toast == "" || now.After(p.toastUntil) {
 		return
 	}
+	p.drawBadge(p.toast, false)
+}
+
+// badgeTextScale is how many screen pixels, at the display's normal
+// scale, each pixel of the 8px debug font takes up in badges.
+const badgeTextScale = 2
+
+// drawBadge shows text in white on black in the top left corner, or the
+// top right one if right is set. It is the same size on screen whatever the
+// video's resolution and the window's size.
+func (p *player) drawBadge(text string, right bool) {
 	r := p.renderer
-	scale := max(1, float32(p.geom.width)/400)
+	scale := p.screenScale() * badgeTextScale
 	char := float32(sdl.DEBUG_TEXT_FONT_CHARACTER_SIZE) * scale
 	pad := char / 2
+	w, h := float32(len([]rune(text)))*char+2*pad, char+2*pad
 	x, y := pad, pad
+	if right {
+		x = float32(p.geom.width) - pad - w
+	}
 	r.SetDrawColor(0, 0, 0, 255)
-	r.RenderFillRect(&sdl.FRect{X: x, Y: y, W: float32(len([]rune(p.toast)))*char + 2*pad, H: char + 2*pad})
+	r.RenderFillRect(&sdl.FRect{X: x, Y: y, W: w, H: h})
 	r.SetDrawColor(255, 255, 255, 255)
 	r.SetScale(scale, scale)
-	r.DebugText((x+pad)/scale, (y+pad)/scale, p.toast)
+	r.DebugText((x+pad)/scale, (y+pad)/scale, text)
 	r.SetScale(1, 1)
+}
+
+// screenScale is how many frame pixels make up one screen pixel at the
+// display's normal scale, for drawing at a fixed size on screen.
+func (p *player) screenScale() float32 {
+	rect, err := p.renderer.LogicalPresentationRect()
+	if err != nil || rect.W <= 0 {
+		return 1
+	}
+	display := float32(1)
+	if w, err := p.renderer.Window(); err == nil {
+		if s, err := w.DisplayScale(); err == nil && s > 0 {
+			display = s
+		}
+	}
+	return float32(p.geom.width) / rect.W * display
 }
 
 // drawDetections outlines and labels detected objects. Coordinates are in

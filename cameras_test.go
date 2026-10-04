@@ -445,3 +445,27 @@ func TestLoadCamerasWithModel(t *testing.T) {
 		t.Fatalf("loadCameras = %+v; want detection on for porch only", cams)
 	}
 }
+
+func TestSetCameraQuiet(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	path, err := camerasPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := saveCameras(path, []savedCamera{{Name: "Porch", Host: "cam", Port: 554, Stream: "live", Detect: true}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := setCameraQuiet("porch", true); err != nil {
+		t.Fatal(err)
+	}
+	cams, _ := loadCameras(path)
+	if !cams[0].Quiet || !cams[0].Detect {
+		t.Fatalf("cams = %+v; want quiet with detection still on", cams)
+	}
+	if cfg := cams[0].config(config{}); !cfg.quiet {
+		t.Fatal("quiet not passed on to the config")
+	}
+	if cam := cameraFromConfig(cams[0].config(config{})); !cam.Quiet {
+		t.Fatal("quiet lost when the camera is saved again")
+	}
+}

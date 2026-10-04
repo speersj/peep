@@ -4,8 +4,8 @@
 // no video is written to disk. Frames are held in a short jitter buffer
 // and shown on their own timestamps, then converted to RGB on the GPU.
 // Press ESC or q in the window to quit, space to save a screenshot to
-// ~/Pictures and copy it to the clipboard, and t to turn object detection
-// on or off.
+// ~/Pictures and copy it to the clipboard, t to turn object detection
+// on or off, and n to turn its notifications off or on.
 package main
 
 import (
@@ -53,6 +53,7 @@ type config struct {
 	hwaccel string
 	stats   bool
 	detect  bool // the camera's object detection setting
+	quiet   bool // no notifications for the camera's detections
 }
 
 // SDL, and the OpenGL context it renders with, must stay on one OS thread,
@@ -93,7 +94,7 @@ func parseArgs(args []string) (config, error) {
 		fmt.Fprintf(fs.Output(), "Usage: peep [flags] [camera]\n\n"+
 			"Displays a live RTSP camera feed; ESC or q quits. Space saves a\n"+
 			"screenshot to ~/Pictures and copies it to the clipboard. t turns\n"+
-			"object detection on or off for the camera.\n\n"+
+			"object detection on or off for the camera, and n its notifications.\n\n"+
 			"With a camera name, peep connects to that saved camera, asking\n"+
 			"for its password unless one is saved; an unknown name starts a\n"+
 			"wizard to add it. Without one, it lists the saved cameras.\n\n")
@@ -358,6 +359,7 @@ func run(cfg config) error {
 		colorspace: streamColorspace(info.colorSpace),
 		stats:      cfg.stats,
 		camera:     cfg.camera,
+		quiet:      cfg.quiet,
 		matrix:     streamMatrix(info.colorSpace),
 	}
 	defer p.destroy()
