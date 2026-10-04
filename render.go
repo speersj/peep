@@ -69,6 +69,7 @@ type player struct {
 
 	detLoading chan detectorResult // a detector being started, or nil
 	detToggled bool                // detLoading was started by the t key
+	detModel   string              // the chosen model, even if it failed to start; "" is off
 
 	toast      string // brief message shown over the video
 	toastUntil time.Time
@@ -198,7 +199,7 @@ func (p *player) handleEvents() (bool, error) {
 			case sdl.K_SPACE:
 				p.screenshot()
 			case sdl.K_T:
-				p.toggleDetection()
+				p.cycleDetection()
 			}
 		}
 	}
@@ -286,36 +287,38 @@ type detectorResult struct {
 	err error
 }
 
-// toggleDetection switches detection on or off for this camera and saves
-// the choice. Starting the detector can involve downloading the model, so
-// it happens in the background; stopping waits for an analysis in progress,
-// so that happens in the background too.
-func (p *player) toggleDetection() {
-	now := time.Now()
-	switch {
-	case p.detLoading != nil:
+// cycleDetection moves this camera's detection on to the next model, or
+// off after the last, and saves the choice. Starting a detector can involve
+// downloading its model, so it happens in the background; stopping waits
+// for an analysis in progress, so that happens in the background too.
+func (p *player) cycleDetection() {
+	if p.detLoading != nil {
 		return // still starting
-	case p.det != nil:
-		det := p.det
-		p.det = nil
-		go det.close()
-		p.showToast("Detection off", now)
-		p.saveDetect(false)
-	default:
-		p.startDetector(true)
-		p.showToast("Starting detection...", now)
 	}
+	now := time.Now()
+	if p.det != nil {
+		go p.det.close()
+		p.det = nil
+	}
+	p.detModel = nextModel(p.detModel)
+	if p.detModel == "" {
+		p.showToast("Detection off", now)
+		p.saveModel("")
+		return
+	}
+	p.startDetector(p.detModel, true)
+	p.showToast("Starting "+modelTitle(p.detModel)+"...", now)
 }
 
-// startDetector starts a detector in the background, for pollDetector to
-// pick up. toggled says the user turned detection on, which is announced
-// and saved, rather than it being on for the camera already.
-func (p *player) startDetector(toggled bool) {
+// startDetector starts a detector running modelID in the background, for
+// pollDetector to pick up. toggled says the user chose the model, which is
+// announced and saved, rather than it being the camera's model already.
+func (p *player) startDetector(modelID string, toggled bool) {
 	ch := make(chan detectorResult, 1)
-	p.detLoading, p.detToggled = ch, toggled
+	p.detModel, p.detLoading, p.detToggled = modelID, ch, toggled
 	camera, geom, matrix := p.camera, p.geom, p.matrix
 	go func() {
-		det, err := newDetector(camera, geom, matrix)
+		det, err := newDetector(modelID, camera, geom, matrix)
 		ch <- detectorResult{det, err}
 	}()
 }
@@ -330,24 +333,24 @@ func (p *player) pollDetector(now time.Time) {
 		p.detLoading = nil
 		if res.err != nil {
 			fmt.Fprintf(os.Stderr, "peep: detection is off: %v\n", res.err)
-			p.showToast("Detection unavailable (see terminal)", now)
+			p.showToast(modelTitle(p.detModel)+" unavailable (see terminal)", now)
 			return
 		}
 		p.det = res.det
 		if p.detToggled {
-			p.showToast("Detection on", now)
-			p.saveDetect(true)
+			p.showToast("Detection: "+res.det.model.title, now)
+			p.saveModel(res.det.model.id)
 		}
 	default:
 	}
 }
 
-// saveDetect records the detection setting for the camera.
-func (p *player) saveDetect(on bool) {
+// saveModel records the detection model for the camera.
+func (p *player) saveModel(modelID string) {
 	if p.camera == "" {
 		return
 	}
-	if err := setCameraDetect(p.camera, on); err != nil {
+	if err := setCameraModel(p.camera, modelID); err != nil {
 		fmt.Fprintf(os.Stderr, "peep: saving detection setting: %v\n", err)
 	}
 }

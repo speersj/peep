@@ -23,13 +23,8 @@ import (
 	ort "github.com/shota3506/onnxruntime-purego/onnxruntime"
 )
 
-// The detection model is YOLOX-s (Apache-2.0), trained on the 80 COCO
-// classes. It is downloaded on first use and checked against modelSHA256.
 const (
-	modelName   = "yolox_s.onnx"
-	modelURL    = "https://github.com/Megvii-BaseDetection/YOLOX/releases/download/0.1.1rc0/yolox_s.onnx"
-	modelSHA256 = "c5c2d13e59ae883e6af3b45daea64af4833a4951c92d116ec270d9ddbe998063"
-	modelInput  = 640 // square input size, in pixels
+	modelInput = 640 // square input size of every model, in pixels
 
 	ortAPIVersion = 23 // ONNX Runtime 1.23 or newer
 	// ortThreads is 1 because ONNX Runtime's worker threads spin while
@@ -38,7 +33,6 @@ const (
 	ortThreads = 1
 
 	detectInterval = 250 * time.Millisecond // how often a frame is analyzed
-	minScore       = 0.5                    // objectness × class confidence
 	nmsIoU         = 0.45                   // overlap above which boxes are merged
 
 	confirmRuns   = 2                // runs in a row an object must be seen before notifying
@@ -53,6 +47,77 @@ const (
 	pruneFraction = 0.1
 	pruneEvery    = 10 * time.Minute
 )
+
+// model is a detection model peep can run. All are trained on the 80 COCO
+// classes, take a modelInput-square image and are downloaded on first use,
+// checked against sha256.
+type model struct {
+	id       string // in settings and file names
+	title    string // for people
+	file     string // name in the models directory
+	url      string
+	sha256   string
+	sizeMB   int
+	stretch  bool    // input is the whole frame stretched square, RGB 0-1; else letterboxed BGR 0-255
+	minScore float32 // confidence below which detections are dropped
+	decode   func(d *detector, outs map[string]*ort.Value) ([]detection, error)
+}
+
+// models are the detection models, in the order t cycles through them.
+var models = []model{
+	{
+		// YOLOX-s (Apache-2.0): fast, good in daylight.
+		id: "yolox-s", title: "YOLOX-s", file: "yolox_s.onnx",
+		url:    "https://github.com/Megvii-BaseDetection/YOLOX/releases/download/0.1.1rc0/yolox_s.onnx",
+		sha256: "c5c2d13e59ae883e6af3b45daea64af4833a4951c92d116ec270d9ddbe998063",
+		sizeMB: 36, minScore: 0.5, decode: (*detector).decodeYOLOX,
+	},
+	{
+		// D-FINE-S (Apache-2.0), pretrained on Objects365 then trained on
+		// COCO: about 10 AP more accurate than YOLOX-s for similar work.
+		// Exported to ONNX by Hugging Face's onnx-community, pinned to a
+		// revision.
+		id: "dfine-s", title: "D-FINE-S", file: "dfine_s_obj2coco.onnx",
+		url:    "https://huggingface.co/onnx-community/dfine_s_obj2coco-ONNX/resolve/f69c4ca98cba7ca58aa15b3d4600867808fecf1b/onnx/model.onnx",
+		sha256: "b9e2e76610053aeeac3b2f1f685d8f9a1182a93a338f624b6c8cb7fb390cb532",
+		sizeMB: 42, stretch: true, minScore: 0.5, decode: (*detector).decodeDFINE,
+	},
+}
+
+// findModel returns the model with the given id.
+func findModel(id string) (model, bool) {
+	for _, m := range models {
+		if m.id == id {
+			return m, true
+		}
+	}
+	return model{}, false
+}
+
+// nextModel is the model after id in models, or "" (off) after the last.
+// Off, or an unknown id, is followed by the first.
+func nextModel(id string) string {
+	for i, m := range models {
+		if m.id == id {
+			if i+1 < len(models) {
+				return models[i+1].id
+			}
+			return ""
+		}
+	}
+	return models[0].id
+}
+
+// modelTitle names the model with the given id for people; "" is "off".
+func modelTitle(id string) string {
+	if m, ok := findModel(id); ok {
+		return m.title
+	}
+	if id == "" {
+		return "off"
+	}
+	return id
+}
 
 // cocoNames are the model's classes, in output order.
 var cocoNames = [80]string{
@@ -110,6 +175,7 @@ func (d detection) label() string {
 // submit, at most every detectInterval and never while one is in progress,
 // so playback never waits for it.
 type detector struct {
+	model  model
 	camera string
 	geom   frameGeom
 	matrix yuvMatrix
@@ -122,10 +188,9 @@ type detector struct {
 	free       chan []byte // spare frame buffers
 	lastSubmit time.Time
 
-	tensor []float32   // model input, BGR planes
-	thumb  *image.RGBA // the frame at model resolution, for scaling
-	scale  float32     // model pixels per frame pixel
-	track  tracker
+	tensor   []float32 // model input planes
+	inW, inH int       // the part of the input the frame is scaled into
+	track    tracker
 
 	mu     sync.Mutex
 	latest []detection
@@ -135,9 +200,14 @@ type detector struct {
 	done chan struct{}
 }
 
-// newDetector loads ONNX Runtime and the model, downloading it if needed.
-func newDetector(camera string, geom frameGeom, matrix yuvMatrix) (*detector, error) {
-	modelPath, err := ensureModel()
+// newDetector loads ONNX Runtime and the model with id modelID,
+// downloading it if needed.
+func newDetector(modelID, camera string, geom frameGeom, matrix yuvMatrix) (*detector, error) {
+	mod, ok := findModel(modelID)
+	if !ok {
+		return nil, fmt.Errorf("unknown detection model %q", modelID)
+	}
+	modelPath, err := ensureModel(mod)
 	if err != nil {
 		return nil, err
 	}
@@ -145,7 +215,7 @@ func newDetector(camera string, geom frameGeom, matrix yuvMatrix) (*detector, er
 	if err != nil {
 		return nil, fmt.Errorf("loading ONNX Runtime (is it installed?): %w", err)
 	}
-	d := &detector{camera: camera, geom: geom, matrix: matrix, rt: rt}
+	d := &detector{model: mod, camera: camera, geom: geom, matrix: matrix, rt: rt}
 	if d.env, err = rt.NewEnv("peep", ort.LoggingLevelWarning); err != nil {
 		d.close()
 		return nil, err
@@ -155,13 +225,15 @@ func newDetector(camera string, geom frameGeom, matrix yuvMatrix) (*detector, er
 		return nil, fmt.Errorf("loading %s: %w", modelPath, err)
 	}
 
-	d.scale = float32(math.Min(float64(modelInput)/float64(geom.width), float64(modelInput)/float64(geom.height)))
-	tw := max(1, int(math.Round(float64(geom.width)*float64(d.scale))))
-	th := max(1, int(math.Round(float64(geom.height)*float64(d.scale))))
-	d.thumb = image.NewRGBA(image.Rect(0, 0, tw, th))
+	d.inW, d.inH = modelInput, modelInput
 	d.tensor = make([]float32, 3*modelInput*modelInput)
-	for i := range d.tensor {
-		d.tensor[i] = 114 // YOLOX pads with grey
+	if !mod.stretch {
+		scale := d.letterboxScale()
+		d.inW = max(1, int(math.Round(float64(geom.width)*float64(scale))))
+		d.inH = max(1, int(math.Round(float64(geom.height)*float64(scale))))
+		for i := range d.tensor {
+			d.tensor[i] = 114 // YOLOX pads with grey
+		}
 	}
 	d.frames = make(chan []byte, 1)
 	d.free = make(chan []byte, 1)
@@ -236,6 +308,12 @@ func (d *detector) run() {
 	}
 }
 
+// letterboxScale is model pixels per frame pixel when the frame keeps its
+// shape inside the model input.
+func (d *detector) letterboxScale() float32 {
+	return float32(math.Min(float64(modelInput)/float64(d.geom.width), float64(modelInput)/float64(d.geom.height)))
+}
+
 // analyze runs the model on an NV12 frame.
 func (d *detector) analyze(frame []byte) ([]detection, error) {
 	d.prepare(frame)
@@ -251,21 +329,51 @@ func (d *detector) analyze(frame []byte) ([]detection, error) {
 	for _, v := range outs {
 		defer v.Close()
 	}
-	out, shape, err := ort.GetTensorData[float32](outs[d.sess.OutputNames()[0]])
+	return d.model.decode(d, outs)
+}
+
+// output fetches the model's output called name, checking it has the
+// given number of values in its last dimension.
+func (d *detector) output(outs map[string]*ort.Value, name string, last int64) ([]float32, error) {
+	v, ok := outs[name]
+	if !ok {
+		return nil, fmt.Errorf("model has no output %q (has %v)", name, d.sess.OutputNames())
+	}
+	out, shape, err := ort.GetTensorData[float32](v)
 	if err != nil {
 		return nil, err
 	}
-	if len(shape) != 3 || shape[2] != 85 {
-		return nil, fmt.Errorf("unexpected model output shape %v", shape)
+	if len(shape) != 3 || shape[2] != last {
+		return nil, fmt.Errorf("unexpected shape %v for model output %q", shape, name)
 	}
-	return decodeYOLOX(out, modelInput, d.scale, d.geom.width, d.geom.height), nil
+	return out, nil
 }
 
-// prepare scales an NV12 frame down into d.thumb and the model's input
-// tensor, averaging the luma under each output pixel.
+func (d *detector) decodeYOLOX(outs map[string]*ort.Value) ([]detection, error) {
+	out, err := d.output(outs, d.sess.OutputNames()[0], 85)
+	if err != nil {
+		return nil, err
+	}
+	return decodeYOLOX(out, modelInput, d.letterboxScale(), d.model.minScore, d.geom.width, d.geom.height), nil
+}
+
+func (d *detector) decodeDFINE(outs map[string]*ort.Value) ([]detection, error) {
+	logits, err := d.output(outs, "logits", int64(len(cocoNames)))
+	if err != nil {
+		return nil, err
+	}
+	boxes, err := d.output(outs, "pred_boxes", 4)
+	if err != nil {
+		return nil, err
+	}
+	return decodeDFINE(logits, boxes, d.model.minScore, d.geom.width, d.geom.height), nil
+}
+
+// prepare scales an NV12 frame into the top left d.inW x d.inH of the
+// model's input tensor, averaging the luma under each output pixel.
 func (d *detector) prepare(frame []byte) {
 	g := d.geom
-	tw, th := d.thumb.Rect.Dx(), d.thumb.Rect.Dy()
+	tw, th := d.inW, d.inH
 	plane := modelInput * modelInput
 	uv := frame[g.padW*g.padH:]
 	for y := range th {
@@ -283,10 +391,12 @@ func (d *detector) prepare(frame []byte) {
 			cx, cy := (sx0+sx1)/2/2, (sy0+sy1)/2/2
 			c := uv[cy*g.padW+cx*2:]
 			r, gg, b := d.matrix.rgb(uint8(sum/n), c[0], c[1])
-			o := d.thumb.PixOffset(x, y)
-			d.thumb.Pix[o], d.thumb.Pix[o+1], d.thumb.Pix[o+2], d.thumb.Pix[o+3] = r, gg, b, 255
 			i := y*modelInput + x
-			d.tensor[i], d.tensor[plane+i], d.tensor[2*plane+i] = float32(b), float32(gg), float32(r)
+			if d.model.stretch {
+				d.tensor[i], d.tensor[plane+i], d.tensor[2*plane+i] = float32(r)/255, float32(gg)/255, float32(b)/255
+			} else {
+				d.tensor[i], d.tensor[plane+i], d.tensor[2*plane+i] = float32(b), float32(gg), float32(r)
+			}
 		}
 	}
 }
@@ -294,7 +404,7 @@ func (d *detector) prepare(frame []byte) {
 // decodeYOLOX turns YOLOX output rows (cx, cy, w, h, objectness, 80 class
 // scores, relative to a grid cell) into reported detections in frame
 // coordinates, merging overlapping boxes.
-func decodeYOLOX(out []float32, size int, scale float32, frameW, frameH int) []detection {
+func decodeYOLOX(out []float32, size int, scale, minScore float32, frameW, frameH int) []detection {
 	var cands []detection
 	row := 0
 	for _, stride := range []int{8, 16, 32} {
@@ -324,6 +434,36 @@ func decodeYOLOX(out []float32, size int, scale float32, frameW, frameH int) []d
 				})
 			}
 		}
+	}
+	return nms(cands, nmsIoU)
+}
+
+// decodeDFINE turns D-FINE's queries, each with 80 class logits and a box
+// (cx, cy, w, h as fractions of the stretched frame), into reported
+// detections in frame coordinates. D-FINE does not produce duplicates of
+// one class, but nms still stops one pickup being both a car and a truck.
+func decodeDFINE(logits, boxes []float32, minScore float32, frameW, frameH int) []detection {
+	n := len(cocoNames)
+	var cands []detection
+	for q := range len(boxes) / 4 {
+		best, class := float32(math.Inf(-1)), 0
+		for c, l := range logits[q*n : (q+1)*n] {
+			if l > best {
+				best, class = l, c
+			}
+		}
+		score := float32(1 / (1 + math.Exp(-float64(best))))
+		if score < minScore || classKind(class) == kindNone {
+			continue
+		}
+		b := boxes[q*4 : q*4+4]
+		fw, fh := float32(frameW), float32(frameH)
+		cx, cy, w, h := b[0]*fw, b[1]*fh, b[2]*fw, b[3]*fh
+		cands = append(cands, detection{
+			class: class, score: score,
+			x0: clampF(cx-w/2, 0, fw), y0: clampF(cy-h/2, 0, fh),
+			x1: clampF(cx+w/2, 0, fw), y1: clampF(cy+h/2, 0, fh),
+		})
 	}
 	return nms(cands, nmsIoU)
 }
@@ -432,7 +572,7 @@ func (d *detector) announce(frame []byte, class int, dets []detection, now time.
 	if count > 1 {
 		summary = fmt.Sprintf("%d × %s detected", count, name)
 	}
-	body := fmt.Sprintf("%s · %s · %.0f%% confident", d.camera, now.Format("15:04:05"), best*100)
+	body := fmt.Sprintf("%s · %s · %.0f%% confident (%s)", d.camera, now.Format("15:04:05"), best*100, d.model.title)
 	fmt.Fprintf(os.Stderr, "peep: %s (%s)\n", strings.ToLower(summary), path)
 	err = notifyImage(notification{image: path, summary: summary, body: body, category: "device"})
 	if err != nil {
@@ -455,7 +595,7 @@ func (d *detector) saveEvent(frame []byte, class int, dets []detection, now time
 	for _, det := range dets {
 		drawBox(img, det, kindColors[classKind(det.class)], thick)
 	}
-	name := fmt.Sprintf("%s-%s-%s.jpg", now.Format("2006-01-02-15-04-05"), safeName(d.camera), strings.ReplaceAll(cocoNames[class], " ", "-"))
+	name := fmt.Sprintf("%s-%s-%s-%s.jpg", now.Format("2006-01-02-15-04-05"), safeName(d.camera), d.model.id, strings.ReplaceAll(cocoNames[class], " ", "-"))
 	path := filepath.Join(dir, name)
 	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
 	if err != nil {
@@ -579,24 +719,24 @@ func pruneEvents(dir string, maxAge time.Duration, maxBytes int64, now time.Time
 	return deleted, nil
 }
 
-// ensureModel returns the path to the detection model, downloading and
-// verifying it on first use.
-func ensureModel() (string, error) {
+// ensureModel returns the path to m, downloading and verifying it on first
+// use.
+func ensureModel(m model) (string, error) {
 	dir, err := os.UserCacheDir()
 	if err != nil {
 		return "", err
 	}
-	path := filepath.Join(dir, "peep", "models", modelName)
+	path := filepath.Join(dir, "peep", "models", m.file)
 	if _, err := os.Stat(path); err == nil {
 		return path, nil
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return "", err
 	}
-	fmt.Fprintf(os.Stderr, "peep: downloading the detection model (36 MB) to %s\n", path)
+	fmt.Fprintf(os.Stderr, "peep: downloading the %s detection model (%d MB) to %s\n", m.title, m.sizeMB, path)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, modelURL, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, m.url, nil)
 	if err != nil {
 		return "", err
 	}
@@ -621,7 +761,7 @@ func ensureModel() (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("downloading model: %w", err)
 	}
-	if sum := hex.EncodeToString(h.Sum(nil)); sum != modelSHA256 {
+	if sum := hex.EncodeToString(h.Sum(nil)); sum != m.sha256 {
 		return "", errors.New("downloaded model failed its checksum; not using it")
 	}
 	return path, os.Rename(tmp.Name(), path)

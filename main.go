@@ -4,8 +4,8 @@
 // no video is written to disk. Frames are held in a short jitter buffer
 // and shown on their own timestamps, then converted to RGB on the GPU.
 // Press ESC or q in the window to quit, space to save a screenshot to
-// ~/Pictures and copy it to the clipboard, and t to turn object detection
-// on or off.
+// ~/Pictures and copy it to the clipboard, and t to cycle object detection
+// through its models and off.
 package main
 
 import (
@@ -52,7 +52,7 @@ type config struct {
 	buffer  time.Duration
 	hwaccel string
 	stats   bool
-	detect  bool // the camera's object detection setting
+	model   string // the camera's detection model id; "" is off
 }
 
 // SDL, and the OpenGL context it renders with, must stay on one OS thread,
@@ -92,8 +92,8 @@ func parseArgs(args []string) (config, error) {
 	fs.Usage = func() {
 		fmt.Fprintf(fs.Output(), "Usage: peep [flags] [camera]\n\n"+
 			"Displays a live RTSP camera feed; ESC or q quits. Space saves a\n"+
-			"screenshot to ~/Pictures and copies it to the clipboard. t turns\n"+
-			"object detection on or off for the camera.\n\n"+
+			"screenshot to ~/Pictures and copies it to the clipboard. t cycles\n"+
+			"object detection for the camera through its models and off.\n\n"+
 			"With a camera name, peep connects to that saved camera, asking\n"+
 			"for its password unless one is saved; an unknown name starts a\n"+
 			"wizard to add it. Without one, it lists the saved cameras.\n\n")
@@ -364,8 +364,8 @@ func run(cfg config) error {
 	if err := p.newRenderer(window); err != nil {
 		return err
 	}
-	if cfg.detect {
-		p.startDetector(false) // in the background, as it may download the model
+	if cfg.model != "" {
+		p.startDetector(cfg.model, false) // in the background, as it may download the model
 	}
 	err = p.loop()
 	p.saving.Wait() // let screenshots in progress finish writing

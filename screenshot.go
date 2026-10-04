@@ -22,10 +22,15 @@ func screenshotDir() (string, error) {
 }
 
 // createScreenshot creates a new file named peep-yyyy-mm-dd-hh-mm.png in
-// dir, using t's time zone. Later shots in the same minute get a -2, -3, …
-// suffix rather than overwriting earlier ones.
-func createScreenshot(dir string, t time.Time) (*os.File, error) {
-	base := "peep-" + t.Format("2006-01-02-15-04")
+// dir, using t's time zone, or peep-MODEL-yyyy-mm-dd-hh-mm.png when a
+// detection model is running. Later shots in the same minute get a -2,
+// -3, … suffix rather than overwriting earlier ones.
+func createScreenshot(dir, modelID string, t time.Time) (*os.File, error) {
+	base := "peep-"
+	if modelID != "" {
+		base += modelID + "-"
+	}
+	base += t.Format("2006-01-02-15-04")
 	for n := 1; ; n++ {
 		name := base
 		if n > 1 {
@@ -39,7 +44,8 @@ func createScreenshot(dir string, t time.Time) (*os.File, error) {
 }
 
 // writeScreenshot saves img as a PNG in ~/Pictures and returns its path.
-func writeScreenshot(img image.Image, t time.Time) (string, error) {
+// modelID names the detection model in use, if any.
+func writeScreenshot(img image.Image, modelID string, t time.Time) (string, error) {
 	dir, err := screenshotDir()
 	if err != nil {
 		return "", err
@@ -47,7 +53,7 @@ func writeScreenshot(img image.Image, t time.Time) (string, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", err
 	}
-	f, err := createScreenshot(dir, t)
+	f, err := createScreenshot(dir, modelID, t)
 	if err != nil {
 		return "", err
 	}
@@ -75,8 +81,12 @@ func (p *player) screenshot() {
 		fmt.Fprintf(os.Stderr, "peep: capturing screenshot: %v\n", err)
 		return
 	}
+	modelID := ""
+	if p.det != nil {
+		modelID = p.det.model.id
+	}
 	p.saving.Go(func() {
-		path, err := writeScreenshot(img, t)
+		path, err := writeScreenshot(img, modelID, t)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "peep: saving screenshot: %v\n", err)
 			return

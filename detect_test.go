@@ -32,7 +32,7 @@ func TestDecodeYOLOX(t *testing.T) {
 	yoloxRow(out, 200, 0.5, 0.5, 1, 1, 0.5, 16, 0.5)
 
 	// Frame is twice the model resolution.
-	dets := decodeYOLOX(out, size, 0.5, 1280, 720)
+	dets := decodeYOLOX(out, size, 0.5, 0.5, 1280, 720)
 	if len(dets) != 1 {
 		t.Fatalf("got %d detections %+v; want 1 person", len(dets), dets)
 	}
@@ -43,6 +43,49 @@ func TestDecodeYOLOX(t *testing.T) {
 	}
 	if abs32(d.score-0.81) > 0.001 {
 		t.Errorf("score = %v; want 0.81", d.score)
+	}
+}
+
+func TestDecodeDFINE(t *testing.T) {
+	const queries = 4
+	logits := make([]float32, queries*80)
+	for i := range logits {
+		logits[i] = -10 // sigmoid ~0
+	}
+	boxes := make([]float32, queries*4)
+	set := func(q, class int, logit float32, cx, cy, w, h float32) {
+		logits[q*80+class] = logit
+		copy(boxes[q*4:], []float32{cx, cy, w, h})
+	}
+	set(0, 0, 2, 0.25, 0.5, 0.1, 0.2)   // person, sigmoid(2) = 0.881
+	set(1, 7, 1, 0.75, 0.5, 0.2, 0.2)   // truck, 0.731
+	set(2, 2, 0.5, 0.75, 0.5, 0.2, 0.2) // the same vehicle as a car: merged
+	set(3, 56, 5, 0.5, 0.5, 0.1, 0.1)   // a chair: not reported
+
+	dets := decodeDFINE(logits, boxes, 0.5, 1280, 720)
+	if len(dets) != 2 || dets[0].class != 0 || dets[1].class != 7 {
+		t.Fatalf("got %+v; want a person and a truck", dets)
+	}
+	p := dets[0]
+	if abs32(p.x0-256) > 0.5 || abs32(p.y0-288) > 0.5 || abs32(p.x1-384) > 0.5 || abs32(p.y1-432) > 0.5 {
+		t.Errorf("person box %+v; want 256,288-384,432", p)
+	}
+	if abs32(p.score-0.881) > 0.001 {
+		t.Errorf("score = %v; want 0.881", p.score)
+	}
+}
+
+func TestNextModel(t *testing.T) {
+	id, seen := "", []string{}
+	for range len(models) + 1 {
+		id = nextModel(id)
+		seen = append(seen, id)
+	}
+	if seen[0] != "yolox-s" || seen[1] != "dfine-s" || seen[len(seen)-1] != "" {
+		t.Errorf("t cycles %q; want each model then off", seen)
+	}
+	if nextModel("gone") != models[0].id {
+		t.Error("an unknown model is not followed by the first")
 	}
 }
 
@@ -93,9 +136,10 @@ func TestTracker(t *testing.T) {
 	}
 }
 
-// TestDetectorOnFrame runs the real model on an image, so it needs ONNX
+// TestDetectorOnFrame runs a real model on an image, so it needs ONNX
 // Runtime, ffmpeg and the model (downloaded on first use). Run it with
 // PEEP_DETECT_TEST=<image> and PEEP_DETECT_EXPECT=<class>, e.g. truck.
+// PEEP_DETECT_MODEL picks the model, by default the first.
 func TestDetectorOnFrame(t *testing.T) {
 	img := os.Getenv("PEEP_DETECT_TEST")
 	if img == "" {
@@ -117,7 +161,11 @@ func TestDetectorOnFrame(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	d, err := newDetector("test", geom, bt709)
+	modelID := os.Getenv("PEEP_DETECT_MODEL")
+	if modelID == "" {
+		modelID = models[0].id
+	}
+	d, err := newDetector(modelID, "test", geom, bt709)
 	if err != nil {
 		t.Fatal(err)
 	}
