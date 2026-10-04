@@ -77,9 +77,8 @@ Cameras are saved under a name you choose, such as `frontdoor`.
     it connects straight away.
   - Otherwise peep asks for the password, then offers to remember it.
   - If there is no camera called `frontdoor`, a short wizard adds one under
-    that name. It asks for the host, stream path, which
-    [detection](#detection) model to use, if any, and optionally a username
-    and password.
+    that name. It asks for the host, stream path, whether to turn on
+    [detection](#detection), and optionally a username and password.
 - **`peep`** with no name lists the saved cameras, newest first, along with
   an option to add a new one.
 
@@ -88,7 +87,7 @@ Cameras are saved under a name you choose, such as `frontdoor`.
 | ↑ / ↓, j / k  | move                              |
 | enter         | connect                           |
 | e             | edit the selected camera          |
-| t             | cycle the camera's detection model |
+| t             | toggle detection for the camera   |
 | d             | forget the selected camera        |
 | q / esc       | quit                              |
 
@@ -123,16 +122,14 @@ shows which decoder is in use.
 | -------------- | --------------------------------------------------------- |
 | esc, q         | quit                                                      |
 | space          | save a screenshot, copy it to the clipboard and notify    |
-| t              | cycle detection: YOLOX-s, D-FINE-S, off (saved)            |
+| t              | turn detection on or off for this camera (saved)          |
 
 Keys follow your keyboard layout, so a Caps Lock remapped to Escape (for
 example with XKB's `caps:escape`) also quits.
 
 Screenshots are saved at the stream's full resolution as
-`~/Pictures/peep-YYYY-MM-DD-HH-MM.png`, using your local time zone. While
-detection is on, the model is named too, as in
-`peep-dfine-s-YYYY-MM-DD-HH-MM.png`. Further shots in the same minute get a
-`-2`, `-3`, … suffix.
+`~/Pictures/peep-YYYY-MM-DD-HH-MM.png`, using your local time zone. Further
+shots in the same minute get a `-2`, `-3`, … suffix.
 
 Each screenshot also shows a desktop notification. If your notification server
 supports actions, clicking the notification opens the screenshot in your
@@ -145,10 +142,9 @@ window rules.
 
 ## Detection
 
-Detection is a per-camera setting, with a choice of two models (see
-[Models](#models)). The wizard asks which to use, if any, when you add or edit
-a camera. `t` in the camera list, or in the video window while you watch,
-cycles through YOLOX-s, D-FINE-S and off. The list shows each camera's model.
+Detection is a per-camera setting. The wizard asks whether to turn it on when
+you add or edit a camera, `t` in the camera list toggles it for the selected
+camera, and `t` in the video window turns it on or off while you watch. Cameras with detection on are marked "detection" in the list.
 
 With detection on, peep looks for people, vehicles (bicycles, cars, motorcycles,
 buses and trucks) and animals (birds, cats, dogs, horses, sheep, cows and
@@ -156,10 +152,9 @@ bears) about four times a second. It outlines each one in the video with its
 label and confidence. Other objects, such as furniture, are ignored.
 
 When something appears, peep shows a notification such as "Person detected",
-naming the camera, the time, the confidence and the model. The notification has a
+naming the camera, the time and the confidence. The notification has a
 thumbnail, and clicking it opens the full frame with the detections outlined.
-The frames are saved in `~/.cache/peep/detections`, with the camera, model
-and class in the file name. While peep runs, it
+The frames are saved in `~/.cache/peep/detections`. While peep runs, it
 checks that folder at startup and every 10 minutes. It deletes frames older
 than a week, and if the folder still holds more than 1 GB, it deletes the
 oldest 10% of frames until it is under that limit.
@@ -168,22 +163,21 @@ To avoid repeated or false alerts:
 
 - an object must be seen in two analyses in a row before it is announced;
 - an object that stays in view, such as a parked car, is announced once;
-- a class is announced again only after it has been gone for 30 seconds.
+- a class is announced again only after it has been gone for 30 seconds;
+- something that reappears exactly where one was seen before is not announced
+  again. This covers a garden lamp mistaken for a bird, or a parked car that
+  flickers in and out of detection at night. Its box is still drawn. A place
+  is forgotten after an hour with nothing seen there.
 
-### Models
-
-Both models are Apache-2.0 licensed and trained on the COCO dataset. They run
-on the CPU through ONNX Runtime, use under one core, and never hold up
-playback. Each is downloaded the first time it is used, checked against a
+Detection uses D-FINE-S (Apache-2.0), a model pretrained on the Objects365
+dataset and then trained on COCO. It runs on the CPU through ONNX Runtime,
+takes about a third of a second per frame and uses under one core, and never
+holds up playback. The model (42 MB) is downloaded from Hugging Face's
+onnx-community export the first time you use detection, checked against a
 fixed SHA-256, and kept in `~/.cache/peep/models`.
 
-| Model    | Time per frame | Download | Notes |
-| -------- | -------------- | -------- | ----- |
-| YOLOX-s  | ~0.23s         | 36 MB    | From the YOLOX GitHub release. |
-| D-FINE-S | ~0.33s         | 42 MB    | Pretrained on Objects365, then trained on COCO; scores about 10 points higher than YOLOX-s on COCO's accuracy benchmark. From Hugging Face's onnx-community export. |
-
 Small or distant objects and night-time infrared footage are detected less
-reliably by both.
+reliably.
 
 ## Saved cameras and passwords
 
@@ -213,12 +207,11 @@ go test ./...
 go vet ./...
 ```
 
-`TestDetectorOnFrame` runs a detection model on an image and can check for
-an expected class. `PEEP_DETECT_MODEL` picks the model (`yolox-s`, the
-default, or `dfine-s`). It needs ONNX Runtime and ffmpeg:
+`TestDetectorOnFrame` runs the detection model on an image and can check for
+an expected class. It needs ONNX Runtime and ffmpeg:
 
 ```sh
-PEEP_DETECT_MODEL=dfine-s PEEP_DETECT_TEST=frame.png PEEP_DETECT_EXPECT=truck go test -run TestDetectorOnFrame -v .
+PEEP_DETECT_TEST=frame.png PEEP_DETECT_EXPECT=truck go test -run TestDetectorOnFrame -v .
 ```
 
 `TestRenderMatchesSource` checks SDL's colour conversion and the screenshot

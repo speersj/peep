@@ -9,43 +9,6 @@ import (
 	"time"
 )
 
-// yoloxRow writes one YOLOX output row: offsets within the grid cell, log
-// size in cells, objectness and a single class score.
-func yoloxRow(out []float32, row int, dx, dy, logW, logH, obj float32, class int, score float32) {
-	p := out[row*85 : (row+1)*85]
-	p[0], p[1], p[2], p[3], p[4] = dx, dy, logW, logH, obj
-	p[5+class] = score
-}
-
-func TestDecodeYOLOX(t *testing.T) {
-	const size = 640
-	rows := (size/8)*(size/8) + (size/16)*(size/16) + (size/32)*(size/32)
-	out := make([]float32, rows*85)
-	// A person in stride-8 cell (10, 5): centre (10.5, 5.5) cells = (84, 44)
-	// model pixels, 8x16 model pixels in size.
-	yoloxRow(out, 5*(size/8)+10, 0.5, 0.5, 0, 0.6931472, 0.9, 0, 0.9)
-	// A near-duplicate that should be merged away.
-	yoloxRow(out, 5*(size/8)+11, -0.4, 0.5, 0, 0.6931472, 0.8, 0, 0.8)
-	// A chair, which is not reported.
-	yoloxRow(out, 100, 0.5, 0.5, 1, 1, 0.99, 56, 0.99)
-	// A weak dog, below minScore.
-	yoloxRow(out, 200, 0.5, 0.5, 1, 1, 0.5, 16, 0.5)
-
-	// Frame is twice the model resolution.
-	dets := decodeYOLOX(out, size, 0.5, 0.5, 1280, 720)
-	if len(dets) != 1 {
-		t.Fatalf("got %d detections %+v; want 1 person", len(dets), dets)
-	}
-	d := dets[0]
-	want := detection{class: 0, x0: 160, y0: 72, x1: 176, y1: 104}
-	if d.class != want.class || abs32(d.x0-want.x0) > 0.5 || abs32(d.y0-want.y0) > 0.5 || abs32(d.x1-want.x1) > 0.5 || abs32(d.y1-want.y1) > 0.5 {
-		t.Fatalf("got %+v; want box %+v", d, want)
-	}
-	if abs32(d.score-0.81) > 0.001 {
-		t.Errorf("score = %v; want 0.81", d.score)
-	}
-}
-
 func TestDecodeDFINE(t *testing.T) {
 	const queries = 4
 	logits := make([]float32, queries*80)
@@ -72,20 +35,6 @@ func TestDecodeDFINE(t *testing.T) {
 	}
 	if abs32(p.score-0.881) > 0.001 {
 		t.Errorf("score = %v; want 0.881", p.score)
-	}
-}
-
-func TestNextModel(t *testing.T) {
-	id, seen := "", []string{}
-	for range len(models) + 1 {
-		id = nextModel(id)
-		seen = append(seen, id)
-	}
-	if seen[0] != "yolox-s" || seen[1] != "dfine-s" || seen[len(seen)-1] != "" {
-		t.Errorf("t cycles %q; want each model then off", seen)
-	}
-	if nextModel("gone") != models[0].id {
-		t.Error("an unknown model is not followed by the first")
 	}
 }
 
@@ -136,10 +85,47 @@ func TestTracker(t *testing.T) {
 	}
 }
 
-// TestDetectorOnFrame runs a real model on an image, so it needs ONNX
+// An object that comes and goes without moving, like a garden lamp taken
+// for a bird, is announced once; one that reappears elsewhere is new.
+func TestTrackerIgnoresObjectsThatDoNotMove(t *testing.T) {
+	var tr tracker
+	start := time.Now()
+	at := func(s float64) time.Time { return start.Add(time.Duration(s * float64(time.Second))) }
+	lamp := detection{class: 14, score: 0.55, x0: 720, y0: 670, x1: 760, y1: 740}
+	jiggled := detection{class: 14, score: 0.52, x0: 722, y0: 668, x1: 761, y1: 742}
+	elsewhere := detection{class: 14, score: 0.8, x0: 100, y0: 100, x1: 140, y1: 170}
+
+	tr.update([]detection{lamp}, at(0))
+	if got := tr.update([]detection{lamp}, at(0.25)); len(got) != 1 {
+		t.Fatalf("first sighting not announced: %v", got)
+	}
+	// Lost for longer than goneAfter, then back in the same place.
+	tr.update(nil, at(1))
+	tr.update(nil, at(40))
+	tr.update([]detection{jiggled}, at(41))
+	if got := tr.update([]detection{jiggled}, at(41.25)); got != nil {
+		t.Fatalf("reappearance in the same place announced: %v", got)
+	}
+	// Gone again, then a bird somewhere else, with the lamp still there.
+	tr.update(nil, at(42))
+	tr.update(nil, at(80))
+	tr.update([]detection{lamp, elsewhere}, at(81))
+	if got := tr.update([]detection{lamp, elsewhere}, at(81.25)); len(got) != 1 {
+		t.Fatalf("bird in a new place not announced: %v", got)
+	}
+	// After spotMemory without being seen, the place is forgotten.
+	tr.update(nil, at(82))
+	later := 82 + spotMemory.Seconds() + 60
+	tr.update(nil, at(later))
+	tr.update([]detection{lamp}, at(later+1))
+	if got := tr.update([]detection{lamp}, at(later+1.25)); len(got) != 1 {
+		t.Fatalf("not announced after the place was forgotten: %v", got)
+	}
+}
+
+// TestDetectorOnFrame runs the real model on an image, so it needs ONNX
 // Runtime, ffmpeg and the model (downloaded on first use). Run it with
 // PEEP_DETECT_TEST=<image> and PEEP_DETECT_EXPECT=<class>, e.g. truck.
-// PEEP_DETECT_MODEL picks the model, by default the first.
 func TestDetectorOnFrame(t *testing.T) {
 	img := os.Getenv("PEEP_DETECT_TEST")
 	if img == "" {
@@ -161,11 +147,7 @@ func TestDetectorOnFrame(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	modelID := os.Getenv("PEEP_DETECT_MODEL")
-	if modelID == "" {
-		modelID = models[0].id
-	}
-	d, err := newDetector(modelID, "test", geom, bt709)
+	d, err := newDetector("test", geom, bt709)
 	if err != nil {
 		t.Fatal(err)
 	}

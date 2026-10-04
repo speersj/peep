@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"slices"
 	"strings"
 
 	"charm.land/bubbles/v2/textinput"
@@ -44,7 +43,7 @@ const (
 	stepName = iota
 	stepHost
 	stepStream
-	stepDetect // a choice of model rather than text
+	stepDetect // a yes/no choice rather than text
 	stepUser
 	stepPass
 	numSteps
@@ -63,7 +62,7 @@ type pickerModel struct {
 	step    int
 	inputs  [numSteps]textinput.Model
 	editing string      // name of the camera being edited in the wizard
-	model   string      // the wizard's detection model; "" is off
+	detect  bool        // the wizard's detection choice
 	picked  savedCamera // camera awaiting a password on screenPassword
 
 	pending      config // connection awaiting an answer on screenRemember
@@ -165,7 +164,7 @@ func (m pickerModel) updateList(key tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 	case "t":
 		if m.cursor < len(m.cams) {
-			m.cams[m.cursor].Model = nextModel(m.cams[m.cursor].Model)
+			m.cams[m.cursor].Detect = !m.cams[m.cursor].Detect
 			m.changed = true
 		}
 	case "enter", "space":
@@ -258,7 +257,7 @@ func (m *pickerModel) openWizard(cam savedCamera, step int) tea.Cmd {
 	m.inputs[stepName].SetValue(cam.Name)
 	m.inputs[stepHost].SetValue(cam.addrOrEmpty())
 	m.inputs[stepStream].SetValue(cam.Stream)
-	m.model = cam.Model
+	m.detect = cam.Detect
 	m.inputs[stepUser].SetValue(cam.User)
 	m.inputs[stepPass].SetValue("")
 	for i := range m.inputs {
@@ -272,16 +271,13 @@ func (m *pickerModel) openWizard(cam savedCamera, step int) tea.Cmd {
 func (m pickerModel) wizardKey(key tea.KeyPressMsg) (tea.Model, tea.Cmd, bool) {
 	k := key.String()
 	if m.step == stepDetect {
-		choices := modelChoices()
-		i := max(0, slices.Index(choices, m.model))
 		switch k {
+		case "y", "Y":
+			m.detect, k = true, "enter"
 		case "n", "N":
-			m.model, k = "", "enter"
-		case "space", "right", "l":
-			m.model = choices[(i+1)%len(choices)]
-			return m, nil, true
-		case "left", "h":
-			m.model = choices[(i+len(choices)-1)%len(choices)]
+			m.detect, k = false, "enter"
+		case "space", "left", "right", "h", "l":
+			m.detect = !m.detect
 			return m, nil, true
 		case "enter", "tab", "esc", "shift+tab":
 		default:
@@ -359,7 +355,7 @@ func (m pickerModel) wizardConfig() (config, error) {
 	}
 	cfg.camera = strings.TrimSpace(m.inputs[stepName].Value())
 	cfg.stream = strings.TrimSpace(m.inputs[stepStream].Value())
-	cfg.model = m.model
+	cfg.detect = m.detect
 	cfg.user = strings.TrimSpace(m.inputs[stepUser].Value())
 	cfg.pass = ""
 	if cfg.user != "" {
@@ -411,8 +407,8 @@ func (m pickerModel) View() tea.View {
 				c := m.cams[i]
 				text = fmt.Sprintf("%-*s", width, c.Name)
 				note = dimStyle.Render("  " + c.label())
-				if c.Model != "" {
-					note += dimStyle.Render(" · " + modelTitle(c.Model))
+				if c.Detect {
+					note += dimStyle.Render(" · detection")
 				}
 				if c.RememberPassword {
 					note += dimStyle.Render(" · password saved")
@@ -424,7 +420,7 @@ func (m pickerModel) View() tea.View {
 				b.WriteString("  " + text + note + "\n")
 			}
 		}
-		b.WriteString("\n" + dimStyle.Render("↑/↓ move · enter connect · e edit · t cycle detection · d forget · q quit"))
+		b.WriteString("\n" + dimStyle.Render("↑/↓ move · enter connect · e edit · t toggle detection · d forget · q quit"))
 	case screenWizard:
 		title := "New camera"
 		if m.editing != "" {
@@ -435,7 +431,7 @@ func (m pickerModel) View() tea.View {
 			v := strings.TrimSpace(m.inputs[i].Value())
 			switch {
 			case i == stepDetect:
-				v = modelTitle(m.model)
+				v = onOff(m.detect)
 			case i == stepPass:
 				v = strings.Repeat("*", len(m.inputs[i].Value()))
 			case v == "":
@@ -444,18 +440,16 @@ func (m pickerModel) View() tea.View {
 			b.WriteString(doneStyle.Render(fmt.Sprintf("  %s: %s", stepLabels[i], v)) + "\n")
 		}
 		if m.step == stepDetect {
+			yes, no := "  yes", "  no"
+			if m.detect {
+				yes = selStyle.Render("› yes")
+			} else {
+				no = selStyle.Render("› no")
+			}
 			b.WriteString(labelStyle.Render("Detect people, vehicles and animals?") + "\n")
 			b.WriteString(dimStyle.Render("Outlines them in the video and notifies you when one appears.") + "\n")
-			var opts []string
-			for _, id := range modelChoices() {
-				if id == m.model {
-					opts = append(opts, selStyle.Render("› "+modelTitle(id)))
-				} else {
-					opts = append(opts, "  "+modelTitle(id))
-				}
-			}
-			b.WriteString(strings.Join(opts, "   ") + "\n")
-			b.WriteString("\n" + dimStyle.Render("←/→ choose · n off · enter next · esc back"))
+			b.WriteString(yes + "   " + no + "\n")
+			b.WriteString("\n" + dimStyle.Render("y/n choose · space toggle · enter next · esc back"))
 		} else {
 			b.WriteString(labelStyle.Render(stepLabels[m.step]) + "\n" + m.inputs[m.step].View() + "\n")
 			b.WriteString("\n" + dimStyle.Render("enter next · esc back · ctrl+c quit"))
@@ -482,13 +476,11 @@ func (m pickerModel) View() tea.View {
 	return tea.NewView(b.String())
 }
 
-// modelChoices are the wizard's detection options: off, then each model.
-func modelChoices() []string {
-	ids := []string{""}
-	for _, m := range models {
-		ids = append(ids, m.id)
+func onOff(b bool) string {
+	if b {
+		return "on"
 	}
-	return ids
+	return "off"
 }
 
 // numSteps is how many wizard steps apply given the username so far.

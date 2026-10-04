@@ -67,8 +67,8 @@ type savedCamera struct {
 	Port             int       `json:"port"`
 	User             string    `json:"user,omitempty"`
 	Stream           string    `json:"stream"`
-	Model            string    `json:"model,omitempty"`  // detection model id; "" is off
-	OldDetect        bool      `json:"detect,omitempty"` // before models: true meant YOLOX-s
+	Detect           bool      `json:"detect,omitempty"` // object detection on
+	OldModel         string    `json:"model,omitempty"`  // briefly, a choice of detection model
 	RememberPassword bool      `json:"remember_password,omitempty"`
 	LastUsed         time.Time `json:"last_used"`
 }
@@ -139,12 +139,12 @@ func (c savedCamera) dropPassword() error {
 
 func (c savedCamera) config(base config) config {
 	base.camera, base.host, base.port, base.user, base.stream = c.Name, c.Host, c.Port, c.User, c.Stream
-	base.model = c.Model
+	base.detect = c.Detect
 	return base
 }
 
 func cameraFromConfig(cfg config) savedCamera {
-	return savedCamera{Name: cfg.camera, Host: cfg.host, Port: cfg.port, User: cfg.user, Stream: cfg.stream, Model: cfg.model}
+	return savedCamera{Name: cfg.camera, Host: cfg.host, Port: cfg.port, User: cfg.user, Stream: cfg.stream, Detect: cfg.detect}
 }
 
 // camerasPath is where previously opened cameras are remembered.
@@ -176,15 +176,12 @@ func loadCameras(path string) ([]savedCamera, error) {
 
 // migrateCameras upgrades entries saved by older versions: those from
 // before cameras had names, when "name" held the stream path, are named
-// after their host, and detection turned on before there was a choice of
-// models uses the first model, YOLOX-s.
+// after their host, and a detection model chosen while there was a choice
+// turns detection on.
 func migrateCameras(cams []savedCamera) {
 	for i := range cams {
-		if cams[i].OldDetect {
-			if cams[i].Model == "" {
-				cams[i].Model = models[0].id
-			}
-			cams[i].OldDetect = false
+		if cams[i].OldModel != "" {
+			cams[i].Detect, cams[i].OldModel = true, ""
 		}
 		if cams[i].Stream != "" || cams[i].Name == "" {
 			continue
@@ -256,9 +253,8 @@ func findCamera(cams []savedCamera, name string) (savedCamera, bool) {
 	return savedCamera{}, false
 }
 
-// setCameraModel saves the detection model of the camera called name; ""
-// turns detection off.
-func setCameraModel(name, modelID string) error {
+// setCameraDetect saves the detection setting of the camera called name.
+func setCameraDetect(name string, on bool) error {
 	path, err := camerasPath()
 	if err != nil {
 		return err
@@ -269,7 +265,7 @@ func setCameraModel(name, modelID string) error {
 	}
 	for i := range cams {
 		if cams[i].is(name) {
-			cams[i].Model = modelID
+			cams[i].Detect = on
 			return saveCameras(path, cams)
 		}
 	}

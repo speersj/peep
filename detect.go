@@ -23,21 +23,39 @@ import (
 	ort "github.com/shota3506/onnxruntime-purego/onnxruntime"
 )
 
+// The detection model is D-FINE-S (Apache-2.0), pretrained on Objects365
+// and then trained on the 80 COCO classes, as exported to ONNX by Hugging
+// Face's onnx-community. It is downloaded on first use from a pinned
+// revision and checked against modelSHA256.
 const (
-	modelInput = 640 // square input size of every model, in pixels
+	modelName   = "dfine_s_obj2coco.onnx"
+	modelURL    = "https://huggingface.co/onnx-community/dfine_s_obj2coco-ONNX/resolve/f69c4ca98cba7ca58aa15b3d4600867808fecf1b/onnx/model.onnx"
+	modelSHA256 = "b9e2e76610053aeeac3b2f1f685d8f9a1182a93a338f624b6c8cb7fb390cb532"
+	modelMB     = 42
+	modelInput  = 640 // the frame is stretched to this square size, in pixels
 
 	ortAPIVersion = 23 // ONNX Runtime 1.23 or newer
 	// ortThreads is 1 because ONNX Runtime's worker threads spin while
-	// idle and the binding cannot turn that off: 4 threads ran YOLOX-s in
-	// ~70ms but used over 3 cores, 1 thread takes ~230ms on under 1 core.
+	// idle and the binding cannot turn that off: 4 threads ran a model in
+	// ~70ms but used over 3 cores; 1 thread takes ~330ms on under 1 core.
 	ortThreads = 1
 
 	detectInterval = 250 * time.Millisecond // how often a frame is analyzed
+	minScore       = 0.5                    // confidence below which detections are dropped
 	nmsIoU         = 0.45                   // overlap above which boxes are merged
 
 	confirmRuns   = 2                // runs in a row an object must be seen before notifying
 	goneAfter     = 30 * time.Second // absence after which a reappearance is new
 	boxesShownFor = time.Second      // boxes stay up this long after the last run
+
+	// Places where an object has been seen are remembered until unseen
+	// for spotMemory, so that one reappearing in the same place (overlap
+	// above spotIoU), like a garden lamp taken for a bird or a parked car
+	// that flickers in and out at night, is not announced again. At most
+	// maxSpots are kept.
+	spotMemory = time.Hour
+	spotIoU    = 0.6
+	maxSpots   = 500
 
 	// Saved detection images are deleted after keepEventsFor, and the
 	// oldest pruneFraction of them while they total more than maxEventBytes.
@@ -47,77 +65,6 @@ const (
 	pruneFraction = 0.1
 	pruneEvery    = 10 * time.Minute
 )
-
-// model is a detection model peep can run. All are trained on the 80 COCO
-// classes, take a modelInput-square image and are downloaded on first use,
-// checked against sha256.
-type model struct {
-	id       string // in settings and file names
-	title    string // for people
-	file     string // name in the models directory
-	url      string
-	sha256   string
-	sizeMB   int
-	stretch  bool    // input is the whole frame stretched square, RGB 0-1; else letterboxed BGR 0-255
-	minScore float32 // confidence below which detections are dropped
-	decode   func(d *detector, outs map[string]*ort.Value) ([]detection, error)
-}
-
-// models are the detection models, in the order t cycles through them.
-var models = []model{
-	{
-		// YOLOX-s (Apache-2.0): fast, good in daylight.
-		id: "yolox-s", title: "YOLOX-s", file: "yolox_s.onnx",
-		url:    "https://github.com/Megvii-BaseDetection/YOLOX/releases/download/0.1.1rc0/yolox_s.onnx",
-		sha256: "c5c2d13e59ae883e6af3b45daea64af4833a4951c92d116ec270d9ddbe998063",
-		sizeMB: 36, minScore: 0.5, decode: (*detector).decodeYOLOX,
-	},
-	{
-		// D-FINE-S (Apache-2.0), pretrained on Objects365 then trained on
-		// COCO: about 10 AP more accurate than YOLOX-s for similar work.
-		// Exported to ONNX by Hugging Face's onnx-community, pinned to a
-		// revision.
-		id: "dfine-s", title: "D-FINE-S", file: "dfine_s_obj2coco.onnx",
-		url:    "https://huggingface.co/onnx-community/dfine_s_obj2coco-ONNX/resolve/f69c4ca98cba7ca58aa15b3d4600867808fecf1b/onnx/model.onnx",
-		sha256: "b9e2e76610053aeeac3b2f1f685d8f9a1182a93a338f624b6c8cb7fb390cb532",
-		sizeMB: 42, stretch: true, minScore: 0.5, decode: (*detector).decodeDFINE,
-	},
-}
-
-// findModel returns the model with the given id.
-func findModel(id string) (model, bool) {
-	for _, m := range models {
-		if m.id == id {
-			return m, true
-		}
-	}
-	return model{}, false
-}
-
-// nextModel is the model after id in models, or "" (off) after the last.
-// Off, or an unknown id, is followed by the first.
-func nextModel(id string) string {
-	for i, m := range models {
-		if m.id == id {
-			if i+1 < len(models) {
-				return models[i+1].id
-			}
-			return ""
-		}
-	}
-	return models[0].id
-}
-
-// modelTitle names the model with the given id for people; "" is "off".
-func modelTitle(id string) string {
-	if m, ok := findModel(id); ok {
-		return m.title
-	}
-	if id == "" {
-		return "off"
-	}
-	return id
-}
 
 // cocoNames are the model's classes, in output order.
 var cocoNames = [80]string{
@@ -175,7 +122,6 @@ func (d detection) label() string {
 // submit, at most every detectInterval and never while one is in progress,
 // so playback never waits for it.
 type detector struct {
-	model  model
 	camera string
 	geom   frameGeom
 	matrix yuvMatrix
@@ -188,9 +134,8 @@ type detector struct {
 	free       chan []byte // spare frame buffers
 	lastSubmit time.Time
 
-	tensor   []float32 // model input planes
-	inW, inH int       // the part of the input the frame is scaled into
-	track    tracker
+	tensor []float32 // model input, RGB planes
+	track  tracker
 
 	mu     sync.Mutex
 	latest []detection
@@ -200,14 +145,9 @@ type detector struct {
 	done chan struct{}
 }
 
-// newDetector loads ONNX Runtime and the model with id modelID,
-// downloading it if needed.
-func newDetector(modelID, camera string, geom frameGeom, matrix yuvMatrix) (*detector, error) {
-	mod, ok := findModel(modelID)
-	if !ok {
-		return nil, fmt.Errorf("unknown detection model %q", modelID)
-	}
-	modelPath, err := ensureModel(mod)
+// newDetector loads ONNX Runtime and the model, downloading it if needed.
+func newDetector(camera string, geom frameGeom, matrix yuvMatrix) (*detector, error) {
+	modelPath, err := ensureModel()
 	if err != nil {
 		return nil, err
 	}
@@ -215,7 +155,7 @@ func newDetector(modelID, camera string, geom frameGeom, matrix yuvMatrix) (*det
 	if err != nil {
 		return nil, fmt.Errorf("loading ONNX Runtime (is it installed?): %w", err)
 	}
-	d := &detector{model: mod, camera: camera, geom: geom, matrix: matrix, rt: rt}
+	d := &detector{camera: camera, geom: geom, matrix: matrix, rt: rt}
 	if d.env, err = rt.NewEnv("peep", ort.LoggingLevelWarning); err != nil {
 		d.close()
 		return nil, err
@@ -225,16 +165,7 @@ func newDetector(modelID, camera string, geom frameGeom, matrix yuvMatrix) (*det
 		return nil, fmt.Errorf("loading %s: %w", modelPath, err)
 	}
 
-	d.inW, d.inH = modelInput, modelInput
 	d.tensor = make([]float32, 3*modelInput*modelInput)
-	if !mod.stretch {
-		scale := d.letterboxScale()
-		d.inW = max(1, int(math.Round(float64(geom.width)*float64(scale))))
-		d.inH = max(1, int(math.Round(float64(geom.height)*float64(scale))))
-		for i := range d.tensor {
-			d.tensor[i] = 114 // YOLOX pads with grey
-		}
-	}
 	d.frames = make(chan []byte, 1)
 	d.free = make(chan []byte, 1)
 	d.free <- make([]byte, geom.frameLen())
@@ -308,12 +239,6 @@ func (d *detector) run() {
 	}
 }
 
-// letterboxScale is model pixels per frame pixel when the frame keeps its
-// shape inside the model input.
-func (d *detector) letterboxScale() float32 {
-	return float32(math.Min(float64(modelInput)/float64(d.geom.width), float64(modelInput)/float64(d.geom.height)))
-}
-
 // analyze runs the model on an NV12 frame.
 func (d *detector) analyze(frame []byte) ([]detection, error) {
 	d.prepare(frame)
@@ -329,7 +254,15 @@ func (d *detector) analyze(frame []byte) ([]detection, error) {
 	for _, v := range outs {
 		defer v.Close()
 	}
-	return d.model.decode(d, outs)
+	logits, err := d.output(outs, "logits", int64(len(cocoNames)))
+	if err != nil {
+		return nil, err
+	}
+	boxes, err := d.output(outs, "pred_boxes", 4)
+	if err != nil {
+		return nil, err
+	}
+	return decodeDFINE(logits, boxes, minScore, d.geom.width, d.geom.height), nil
 }
 
 // output fetches the model's output called name, checking it has the
@@ -349,31 +282,11 @@ func (d *detector) output(outs map[string]*ort.Value, name string, last int64) (
 	return out, nil
 }
 
-func (d *detector) decodeYOLOX(outs map[string]*ort.Value) ([]detection, error) {
-	out, err := d.output(outs, d.sess.OutputNames()[0], 85)
-	if err != nil {
-		return nil, err
-	}
-	return decodeYOLOX(out, modelInput, d.letterboxScale(), d.model.minScore, d.geom.width, d.geom.height), nil
-}
-
-func (d *detector) decodeDFINE(outs map[string]*ort.Value) ([]detection, error) {
-	logits, err := d.output(outs, "logits", int64(len(cocoNames)))
-	if err != nil {
-		return nil, err
-	}
-	boxes, err := d.output(outs, "pred_boxes", 4)
-	if err != nil {
-		return nil, err
-	}
-	return decodeDFINE(logits, boxes, d.model.minScore, d.geom.width, d.geom.height), nil
-}
-
-// prepare scales an NV12 frame into the top left d.inW x d.inH of the
-// model's input tensor, averaging the luma under each output pixel.
+// prepare stretches an NV12 frame to the model's square input as RGB from
+// 0 to 1, averaging the luma under each input pixel.
 func (d *detector) prepare(frame []byte) {
 	g := d.geom
-	tw, th := d.inW, d.inH
+	tw, th := modelInput, modelInput
 	plane := modelInput * modelInput
 	uv := frame[g.padW*g.padH:]
 	for y := range th {
@@ -392,50 +305,9 @@ func (d *detector) prepare(frame []byte) {
 			c := uv[cy*g.padW+cx*2:]
 			r, gg, b := d.matrix.rgb(uint8(sum/n), c[0], c[1])
 			i := y*modelInput + x
-			if d.model.stretch {
-				d.tensor[i], d.tensor[plane+i], d.tensor[2*plane+i] = float32(r)/255, float32(gg)/255, float32(b)/255
-			} else {
-				d.tensor[i], d.tensor[plane+i], d.tensor[2*plane+i] = float32(b), float32(gg), float32(r)
-			}
+			d.tensor[i], d.tensor[plane+i], d.tensor[2*plane+i] = float32(r)/255, float32(gg)/255, float32(b)/255
 		}
 	}
-}
-
-// decodeYOLOX turns YOLOX output rows (cx, cy, w, h, objectness, 80 class
-// scores, relative to a grid cell) into reported detections in frame
-// coordinates, merging overlapping boxes.
-func decodeYOLOX(out []float32, size int, scale, minScore float32, frameW, frameH int) []detection {
-	var cands []detection
-	row := 0
-	for _, stride := range []int{8, 16, 32} {
-		cells := size / stride
-		for gy := range cells {
-			for gx := range cells {
-				p := out[row*85 : (row+1)*85]
-				row++
-				best, class := float32(0), 0
-				for c, s := range p[5:] {
-					if s > best {
-						best, class = s, c
-					}
-				}
-				score := p[4] * best
-				if score < minScore || classKind(class) == kindNone {
-					continue
-				}
-				s := float32(stride) / scale
-				cx, cy := (p[0]+float32(gx))*s, (p[1]+float32(gy))*s
-				w := float32(math.Exp(float64(p[2]))) * s
-				h := float32(math.Exp(float64(p[3]))) * s
-				cands = append(cands, detection{
-					class: class, score: score,
-					x0: clampF(cx-w/2, 0, float32(frameW)), y0: clampF(cy-h/2, 0, float32(frameH)),
-					x1: clampF(cx+w/2, 0, float32(frameW)), y1: clampF(cy+h/2, 0, float32(frameH)),
-				})
-			}
-		}
-	}
-	return nms(cands, nmsIoU)
 }
 
 // decodeDFINE turns D-FINE's queries, each with 80 class logits and a box
@@ -504,15 +376,24 @@ func clampF(v, lo, hi float32) float32 { return max(lo, min(v, hi)) }
 
 // tracker decides when a class has newly appeared: seen in confirmRuns
 // analyses in a row after being absent for goneAfter. Objects that stay in
-// view, like a parked car, are announced once.
+// view, like a parked car, are announced once, and so are objects that
+// come and go without moving.
 type tracker struct {
 	classes map[int]*classState
+	spots   []spot
 }
 
 type classState struct {
-	streak   int
-	lastSeen time.Time
-	present  bool
+	streak      int
+	streakStart time.Time // when the current run of sightings began
+	lastSeen    time.Time
+	present     bool
+}
+
+// spot is a place where an object of a class has been seen.
+type spot struct {
+	det                 detection // the latest sighting there
+	firstSeen, lastSeen time.Time
 }
 
 // update records one analysis and returns the classes that just appeared.
@@ -531,13 +412,19 @@ func (t *tracker) update(dets []detection, now time.Time) []int {
 			st = &classState{}
 			t.classes[class] = st
 		}
+		if st.streak == 0 {
+			st.streakStart = now
+		}
 		st.streak++
 		st.lastSeen = now
 		if !st.present && st.streak >= confirmRuns {
 			st.present = true
-			appeared = append(appeared, class)
+			if t.moved(dets, class, st.streakStart) {
+				appeared = append(appeared, class)
+			}
 		}
 	}
+	t.updateSpots(dets, now)
 	for class, st := range t.classes {
 		if seen[class] {
 			continue
@@ -549,6 +436,50 @@ func (t *tracker) update(dets []detection, now time.Time) []int {
 	}
 	slices.Sort(appeared)
 	return appeared
+}
+
+// moved reports whether any detection of class is somewhere new: not at a
+// spot where one was seen before since.
+func (t *tracker) moved(dets []detection, class int, since time.Time) bool {
+	for _, d := range dets {
+		if d.class != class {
+			continue
+		}
+		i := t.spotOf(d)
+		if i < 0 || !t.spots[i].firstSeen.Before(since) {
+			return true
+		}
+	}
+	return false
+}
+
+// spotOf returns the index of the spot d is at, or -1.
+func (t *tracker) spotOf(d detection) int {
+	best, bestIoU := -1, float32(spotIoU)
+	for i, s := range t.spots {
+		if s.det.class == d.class {
+			if iou := overlap(s.det, d); iou > bestIoU {
+				best, bestIoU = i, iou
+			}
+		}
+	}
+	return best
+}
+
+// updateSpots records where dets were seen and forgets old spots.
+func (t *tracker) updateSpots(dets []detection, now time.Time) {
+	for _, d := range dets {
+		if i := t.spotOf(d); i >= 0 {
+			t.spots[i].det, t.spots[i].lastSeen = d, now
+		} else {
+			t.spots = append(t.spots, spot{det: d, firstSeen: now, lastSeen: now})
+		}
+	}
+	t.spots = slices.DeleteFunc(t.spots, func(s spot) bool { return now.Sub(s.lastSeen) > spotMemory })
+	if len(t.spots) > maxSpots {
+		slices.SortFunc(t.spots, func(a, b spot) int { return b.lastSeen.Compare(a.lastSeen) })
+		t.spots = t.spots[:maxSpots]
+	}
 }
 
 // announce saves the frame with its boxes and shows a notification that
@@ -572,7 +503,7 @@ func (d *detector) announce(frame []byte, class int, dets []detection, now time.
 	if count > 1 {
 		summary = fmt.Sprintf("%d × %s detected", count, name)
 	}
-	body := fmt.Sprintf("%s · %s · %.0f%% confident (%s)", d.camera, now.Format("15:04:05"), best*100, d.model.title)
+	body := fmt.Sprintf("%s · %s · %.0f%% confident", d.camera, now.Format("15:04:05"), best*100)
 	fmt.Fprintf(os.Stderr, "peep: %s (%s)\n", strings.ToLower(summary), path)
 	err = notifyImage(notification{image: path, summary: summary, body: body, category: "device"})
 	if err != nil {
@@ -595,7 +526,7 @@ func (d *detector) saveEvent(frame []byte, class int, dets []detection, now time
 	for _, det := range dets {
 		drawBox(img, det, kindColors[classKind(det.class)], thick)
 	}
-	name := fmt.Sprintf("%s-%s-%s-%s.jpg", now.Format("2006-01-02-15-04-05"), safeName(d.camera), d.model.id, strings.ReplaceAll(cocoNames[class], " ", "-"))
+	name := fmt.Sprintf("%s-%s-%s.jpg", now.Format("2006-01-02-15-04-05"), safeName(d.camera), strings.ReplaceAll(cocoNames[class], " ", "-"))
 	path := filepath.Join(dir, name)
 	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
 	if err != nil {
@@ -719,24 +650,24 @@ func pruneEvents(dir string, maxAge time.Duration, maxBytes int64, now time.Time
 	return deleted, nil
 }
 
-// ensureModel returns the path to m, downloading and verifying it on first
-// use.
-func ensureModel(m model) (string, error) {
+// ensureModel returns the path to the detection model, downloading and
+// verifying it on first use.
+func ensureModel() (string, error) {
 	dir, err := os.UserCacheDir()
 	if err != nil {
 		return "", err
 	}
-	path := filepath.Join(dir, "peep", "models", m.file)
+	path := filepath.Join(dir, "peep", "models", modelName)
 	if _, err := os.Stat(path); err == nil {
 		return path, nil
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return "", err
 	}
-	fmt.Fprintf(os.Stderr, "peep: downloading the %s detection model (%d MB) to %s\n", m.title, m.sizeMB, path)
+	fmt.Fprintf(os.Stderr, "peep: downloading the detection model (%d MB) to %s\n", modelMB, path)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, m.url, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, modelURL, nil)
 	if err != nil {
 		return "", err
 	}
@@ -761,7 +692,7 @@ func ensureModel(m model) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("downloading model: %w", err)
 	}
-	if sum := hex.EncodeToString(h.Sum(nil)); sum != m.sha256 {
+	if sum := hex.EncodeToString(h.Sum(nil)); sum != modelSHA256 {
 		return "", errors.New("downloaded model failed its checksum; not using it")
 	}
 	return path, os.Rename(tmp.Name(), path)

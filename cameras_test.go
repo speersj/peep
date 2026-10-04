@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
@@ -146,7 +145,7 @@ func TestLoadLegacyCameras(t *testing.T) {
 
 // press feeds keys to the picker: named keys like "enter", or text to type.
 func press(m pickerModel, keys ...string) pickerModel {
-	named := map[string]rune{"enter": tea.KeyEnter, "esc": tea.KeyEscape, "down": tea.KeyDown, "left": tea.KeyLeft, "right": tea.KeyRight}
+	named := map[string]rune{"enter": tea.KeyEnter, "esc": tea.KeyEscape, "down": tea.KeyDown}
 	for _, k := range keys {
 		if code, ok := named[k]; ok {
 			next, _ := m.Update(tea.KeyPressMsg{Code: code})
@@ -175,8 +174,7 @@ func TestPickerWizard(t *testing.T) {
 	if m.step != stepDetect {
 		t.Fatalf("step %d after the stream; want the detection choice", m.step)
 	}
-	m = press(m, "x", "right", "right", "left", "right", "enter") // other keys are ignored
-
+	m = press(m, "x", "y") // other keys are ignored; y chooses and moves on
 	m = press(m, "admin", "enter", "s3cret", "enter")
 	if m.screen != screenRemember || m.result != nil {
 		t.Fatalf("expected remember prompt; screen %d, err %q", m.screen, m.err)
@@ -188,14 +186,14 @@ func TestPickerWizard(t *testing.T) {
 	if m.result == nil {
 		t.Fatalf("wizard did not finish; step %d, err %q", m.step, m.err)
 	}
-	want := config{camera: "door", host: "cam", port: 8554, stream: "live/ch0", user: "admin", pass: "s3cret", hwaccel: "auto", model: models[1].id, passChoice: passRemember}
+	want := config{camera: "door", host: "cam", port: 8554, stream: "live/ch0", user: "admin", pass: "s3cret", hwaccel: "auto", detect: true, passChoice: passRemember}
 	if *m.result != want {
 		t.Fatalf("result = %+v; want %+v", *m.result, want)
 	}
 
 	// Without a username the password step is skipped.
 	m = press(newPicker(base, nil), "door", "enter", "cam", "enter", "live", "enter", "enter", "enter")
-	if m.result == nil || m.result.port != 554 || m.result.user != "" || m.result.model != "" {
+	if m.result == nil || m.result.port != 554 || m.result.user != "" || m.result.detect {
 		t.Fatalf("result = %+v; want port 554, no user and detection off", m.result)
 	}
 }
@@ -238,19 +236,13 @@ func TestPickerSaved(t *testing.T) {
 		t.Fatalf("duplicate name accepted: step %d, err %q", m.step, m.err)
 	}
 
-	// t cycles the selected camera through the models and off, to be
-	// saved on exit.
+	// t toggles detection for the selected camera, to be saved on exit.
 	m = press(newPicker(config{}, cams), "down", "t")
-	if !m.changed || m.cams[1].Model != models[0].id || m.cams[0].Model != "" {
+	if !m.changed || !m.cams[1].Detect || m.cams[0].Detect {
 		t.Fatalf("toggle: changed %v, cams %+v", m.changed, m.cams)
 	}
-	for _, want := range models[1:] {
-		if m = press(m, "t"); m.cams[1].Model != want.id {
-			t.Fatalf("t chose %q; want %q", m.cams[1].Model, want.id)
-		}
-	}
-	if m = press(m, "t"); m.cams[1].Model != "" {
-		t.Fatal("t after the last model did not turn detection off")
+	if m = press(m, "t"); m.cams[1].Detect {
+		t.Fatal("second t did not turn detection off")
 	}
 
 	// Editing and renaming records the old name so it is replaced.
@@ -268,7 +260,7 @@ func TestPickerSaved(t *testing.T) {
 func TestStartPicker(t *testing.T) {
 	keyring.MockInit()
 	cams := []savedCamera{
-		{Name: "open", Host: "open", Port: 554, Stream: "a", Model: "dfine-s"},
+		{Name: "open", Host: "open", Port: 554, Stream: "a", Detect: true},
 		{Name: "locked", Host: "locked", Port: 554, User: "admin", Stream: "b"},
 		{Name: "saved", Host: "saved", Port: 554, User: "admin", Stream: "c", RememberPassword: true},
 	}
@@ -279,7 +271,7 @@ func TestStartPicker(t *testing.T) {
 	if m, ready := startPicker(config{}, cams); ready != nil || m.screen != screenList || m.direct {
 		t.Fatalf("no name: ready %+v, screen %d; want the list", ready, m.screen)
 	}
-	if _, ready := startPicker(config{camera: "OPEN"}, cams); ready == nil || ready.host != "open" || ready.model != "dfine-s" {
+	if _, ready := startPicker(config{camera: "OPEN"}, cams); ready == nil || ready.host != "open" || !ready.detect {
 		t.Fatalf("no username: ready = %+v; want it to connect", ready)
 	}
 	if _, ready := startPicker(config{camera: "saved"}, cams); ready == nil || ready.pass != "pw" || ready.passChoice != passKeep {
@@ -414,7 +406,7 @@ func TestRecordOpenedPassword(t *testing.T) {
 	}
 }
 
-func TestSetCameraModel(t *testing.T) {
+func TestSetCameraDetect(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	path, err := camerasPath()
 	if err != nil {
@@ -423,23 +415,23 @@ func TestSetCameraModel(t *testing.T) {
 	if err := saveCameras(path, []savedCamera{{Name: "Porch", Host: "cam", Port: 554, Stream: "live"}}); err != nil {
 		t.Fatal(err)
 	}
-	if err := setCameraModel("porch", "dfine-s"); err != nil {
+	if err := setCameraDetect("porch", true); err != nil {
 		t.Fatal(err)
 	}
 	cams, _ := loadCameras(path)
-	if cams[0].Model != "dfine-s" {
-		t.Fatal("detection model not saved")
+	if !cams[0].Detect {
+		t.Fatal("detection not saved")
 	}
-	if err := setCameraModel("garage", "dfine-s"); err == nil {
+	if err := setCameraDetect("garage", true); err == nil {
 		t.Fatal("unknown camera accepted")
 	}
 }
 
-func TestLoadCamerasWithOldDetect(t *testing.T) {
-	// Before there was a choice of models, detection was on or off.
+func TestLoadCamerasWithModel(t *testing.T) {
+	// For a while detection was a choice of model, or none.
 	path := filepath.Join(t.TempDir(), "cameras.json")
 	old := `[
-		{"name": "porch", "host": "cam", "port": 554, "stream": "a", "detect": true},
+		{"name": "porch", "host": "cam", "port": 554, "stream": "a", "model": "yolox-s"},
 		{"name": "garage", "host": "cam", "port": 554, "stream": "b"}
 	]`
 	if err := os.WriteFile(path, []byte(old), 0o600); err != nil {
@@ -449,13 +441,7 @@ func TestLoadCamerasWithOldDetect(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cams[0].Model != "yolox-s" || cams[0].OldDetect || cams[1].Model != "" {
-		t.Fatalf("loadCameras = %+v; want porch on YOLOX-s and garage off", cams)
-	}
-	if err := saveCameras(path, cams); err != nil {
-		t.Fatal(err)
-	}
-	if b, _ := os.ReadFile(path); strings.Contains(string(b), `"detect"`) {
-		t.Errorf("saved file still has the old setting:\n%s", b)
+	if !cams[0].Detect || cams[0].OldModel != "" || cams[1].Detect {
+		t.Fatalf("loadCameras = %+v; want detection on for porch only", cams)
 	}
 }
