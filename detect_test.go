@@ -10,7 +10,7 @@ import (
 )
 
 func TestDecodeDFINE(t *testing.T) {
-	const queries = 4
+	const queries = 6
 	logits := make([]float32, queries*80)
 	for i := range logits {
 		logits[i] = -10 // sigmoid ~0
@@ -24,10 +24,12 @@ func TestDecodeDFINE(t *testing.T) {
 	set(1, 7, 1, 0.75, 0.5, 0.2, 0.2)   // truck, 0.731
 	set(2, 2, 0.5, 0.75, 0.5, 0.2, 0.2) // the same vehicle as a car: merged
 	set(3, 56, 5, 0.5, 0.5, 0.1, 0.1)   // a chair: not reported
+	set(4, 14, 0.2, 0.1, 0.1, 0.1, 0.1) // a bird at 0.55: too unsure
+	set(5, 14, 1, 0.9, 0.1, 0.1, 0.1)   // a bird at 0.731: reported
 
 	dets := decodeDFINE(logits, boxes, 0.5, 1280, 720)
-	if len(dets) != 2 || dets[0].class != 0 || dets[1].class != 7 {
-		t.Fatalf("got %+v; want a person and a truck", dets)
+	if len(dets) != 3 || dets[0].class != 0 || dets[1].class != 7 || dets[2].class != 14 {
+		t.Fatalf("got %+v; want a person, a truck and a bird", dets)
 	}
 	p := dets[0]
 	if abs32(p.x0-256) > 0.5 || abs32(p.y0-288) > 0.5 || abs32(p.x1-384) > 0.5 || abs32(p.y1-432) > 0.5 {

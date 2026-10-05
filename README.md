@@ -152,7 +152,8 @@ off)" if you have turned those off.
 With detection on, peep looks for people, vehicles (bicycles, cars, motorcycles,
 buses and trucks) and animals (birds, cats, dogs, horses, sheep, cows and
 bears) about four times a second. It outlines each one in the video with its
-label and confidence. Other objects, such as furniture, are ignored.
+label and confidence. Objects need a confidence of at least 50%, and birds at
+least 60%. Other objects, such as furniture, are ignored.
 
 When something appears, peep shows a notification such as "Person detected",
 naming the camera, the time and the confidence. The notification has a

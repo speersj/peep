@@ -43,6 +43,7 @@ const (
 
 	detectInterval = 250 * time.Millisecond // how often a frame is analyzed
 	minScore       = 0.5                    // confidence below which detections are dropped
+	minBirdScore   = 0.6                    // the same for birds, often mistaken for garden ornaments
 	nmsIoU         = 0.45                   // overlap above which boxes are merged
 
 	confirmRuns   = 2                // runs in a row an object must be seen before notifying
@@ -327,7 +328,8 @@ func decodeDFINE(logits, boxes []float32, minScore float32, frameW, frameH int) 
 			}
 		}
 		score := float32(1 / (1 + math.Exp(-float64(best))))
-		if score < minScore || classKind(class) == kindNone {
+		if score < minScore || classKind(class) == kindNone ||
+			cocoNames[class] == "bird" && score < minBirdScore {
 			continue
 		}
 		b := boxes[q*4 : q*4+4]
