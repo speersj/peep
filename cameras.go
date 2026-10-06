@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -67,11 +68,14 @@ type savedCamera struct {
 	Port             int       `json:"port"`
 	User             string    `json:"user,omitempty"`
 	Stream           string    `json:"stream"`
-	Detect           bool      `json:"detect,omitempty"` // object detection on
-	Quiet            bool      `json:"quiet,omitempty"`  // no notifications for detections
-	OldModel         string    `json:"model,omitempty"`  // briefly, a choice of detection model
 	RememberPassword bool      `json:"remember_password,omitempty"`
 	LastUsed         time.Time `json:"last_used"`
+
+	// Detection used to be set per camera. These are read only to move
+	// the settings to settings.json, and are not saved again.
+	OldDetect bool   `json:"detect,omitempty"`
+	OldQuiet  bool   `json:"quiet,omitempty"`
+	OldModel  string `json:"model,omitempty"` // briefly, a choice of detection model
 }
 
 // is reports whether the camera is called name, ignoring case.
@@ -140,12 +144,11 @@ func (c savedCamera) dropPassword() error {
 
 func (c savedCamera) config(base config) config {
 	base.camera, base.host, base.port, base.user, base.stream = c.Name, c.Host, c.Port, c.User, c.Stream
-	base.detect, base.quiet = c.Detect, c.Quiet
 	return base
 }
 
 func cameraFromConfig(cfg config) savedCamera {
-	return savedCamera{Name: cfg.camera, Host: cfg.host, Port: cfg.port, User: cfg.user, Stream: cfg.stream, Detect: cfg.detect, Quiet: cfg.quiet}
+	return savedCamera{Name: cfg.camera, Host: cfg.host, Port: cfg.port, User: cfg.user, Stream: cfg.stream}
 }
 
 // camerasPath is where previously opened cameras are remembered.
@@ -178,11 +181,11 @@ func loadCameras(path string) ([]savedCamera, error) {
 // migrateCameras upgrades entries saved by older versions: those from
 // before cameras had names, when "name" held the stream path, are named
 // after their host, and a detection model chosen while there was a choice
-// turns detection on.
+// means detection was on.
 func migrateCameras(cams []savedCamera) {
 	for i := range cams {
 		if cams[i].OldModel != "" {
-			cams[i].Detect, cams[i].OldModel = true, ""
+			cams[i].OldDetect, cams[i].OldModel = true, ""
 		}
 		if cams[i].Stream != "" || cams[i].Name == "" {
 			continue
@@ -200,6 +203,10 @@ func migrateCameras(cams []savedCamera) {
 func saveCameras(path string, cams []savedCamera) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
+	}
+	cams = slices.Clone(cams)
+	for i := range cams {
+		cams[i].OldDetect, cams[i].OldQuiet, cams[i].OldModel = false, false, ""
 	}
 	b, err := json.MarshalIndent(cams, "", "  ")
 	if err != nil {
@@ -252,36 +259,6 @@ func findCamera(cams []savedCamera, name string) (savedCamera, bool) {
 		}
 	}
 	return savedCamera{}, false
-}
-
-// setCameraDetect saves the detection setting of the camera called name.
-func setCameraDetect(name string, on bool) error {
-	return updateCamera(name, func(c *savedCamera) { c.Detect = on })
-}
-
-// setCameraQuiet saves whether detections of the camera called name are
-// announced with notifications.
-func setCameraQuiet(name string, quiet bool) error {
-	return updateCamera(name, func(c *savedCamera) { c.Quiet = quiet })
-}
-
-// updateCamera applies change to the saved camera called name.
-func updateCamera(name string, change func(*savedCamera)) error {
-	path, err := camerasPath()
-	if err != nil {
-		return err
-	}
-	cams, err := loadCameras(path)
-	if err != nil {
-		return err
-	}
-	for i := range cams {
-		if cams[i].is(name) {
-			change(&cams[i])
-			return saveCameras(path, cams)
-		}
-	}
-	return fmt.Errorf("no saved camera called %q", name)
 }
 
 // recordOpened remembers cfg as the most recently opened camera, storing or

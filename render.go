@@ -64,7 +64,7 @@ type player struct {
 	colorspace sdl.Colorspace
 	stats      bool
 	det        *detector // nil unless detection is on
-	camera     string    // saved camera name, for toggling detection
+	camera     string    // saved camera name, for naming detections
 	quiet      bool      // detections are saved without notifications
 	matrix     yuvMatrix
 
@@ -292,8 +292,7 @@ type detectorResult struct {
 	err error
 }
 
-// toggleDetection switches detection on or off for this camera and saves
-// the choice. Starting the detector can involve downloading the model, so
+// toggleDetection switches detection on or off and saves the choice. Starting the detector can involve downloading the model, so
 // it happens in the background; stopping waits for an analysis in progress,
 // so that happens in the background too.
 func (p *player) toggleDetection() {
@@ -315,7 +314,7 @@ func (p *player) toggleDetection() {
 
 // startDetector starts a detector in the background, for pollDetector to
 // pick up. toggled says the user turned detection on, which is announced
-// and saved, rather than it being on for the camera already.
+// and saved, rather than it being on in the settings already.
 func (p *player) startDetector(toggled bool) {
 	ch := make(chan detectorResult, 1)
 	p.detLoading, p.detToggled = ch, toggled
@@ -349,12 +348,9 @@ func (p *player) pollDetector(now time.Time) {
 	}
 }
 
-// saveDetect records the detection setting for the camera.
+// saveDetect records the detection setting.
 func (p *player) saveDetect(on bool) {
-	if p.camera == "" {
-		return
-	}
-	if err := setCameraDetect(p.camera, on); err != nil {
+	if err := changeSettings(func(s *settings) { s.Detect = on }); err != nil {
 		fmt.Fprintf(os.Stderr, "peep: saving detection setting: %v\n", err)
 	}
 }
@@ -371,10 +367,8 @@ func (p *player) toggleQuiet() {
 		msg = "Notifications off"
 	}
 	p.showToast(msg, time.Now())
-	if p.camera == "" {
-		return
-	}
-	if err := setCameraQuiet(p.camera, p.quiet); err != nil {
+	quiet := p.quiet
+	if err := changeSettings(func(s *settings) { s.Quiet = quiet }); err != nil {
 		fmt.Fprintf(os.Stderr, "peep: saving notification setting: %v\n", err)
 	}
 }

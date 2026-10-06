@@ -60,10 +60,10 @@ const (
 	maxSpots   = 500
 
 	// Saved detection images are deleted after keepEventsFor, and the
-	// oldest pruneFraction of them while they total more than maxEventBytes.
-	// Pruning runs at startup and every pruneEvery.
+	// oldest pruneFraction of them while they total more than the
+	// max_detection_storage setting. Pruning runs at startup and every
+	// pruneEvery, rereading the setting each time.
 	keepEventsFor = 7 * 24 * time.Hour
-	maxEventBytes = 1 << 30
 	pruneFraction = 0.1
 	pruneEvery    = 10 * time.Minute
 )
@@ -597,7 +597,7 @@ func pruneEventsPeriodically(ctx context.Context) {
 	tick := time.NewTicker(pruneEvery)
 	defer tick.Stop()
 	for {
-		if _, err := pruneEvents(dir, keepEventsFor, maxEventBytes, time.Now()); err != nil {
+		if _, err := pruneEvents(dir, keepEventsFor, maxDetectionBytes(), time.Now()); err != nil {
 			fmt.Fprintf(os.Stderr, "peep: pruning %s: %v\n", dir, err)
 		}
 		select {

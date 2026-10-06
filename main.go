@@ -52,8 +52,8 @@ type config struct {
 	buffer  time.Duration
 	hwaccel string
 	stats   bool
-	detect  bool // the camera's object detection setting
-	quiet   bool // no notifications for the camera's detections
+	detect  bool // object detection on, from the settings
+	quiet   bool // no notifications for detections, from the settings
 }
 
 // SDL, and the OpenGL context it renders with, must stay on one OS thread,
@@ -70,6 +70,10 @@ func main() {
 		fmt.Fprintf(os.Stderr, "peep: %v\nrun 'peep -h' for usage\n", err)
 		os.Exit(2)
 	}
+	// Before pickCamera, which may save the cameras without the detection
+	// settings they used to hold.
+	st := currentSettings()
+	cfg.detect, cfg.quiet = st.Detect, st.Quiet
 	cfg, err = pickCamera(cfg)
 	if errors.Is(err, errCanceled) {
 		return
@@ -94,7 +98,8 @@ func parseArgs(args []string) (config, error) {
 		fmt.Fprintf(fs.Output(), "Usage: peep [flags] [camera]\n\n"+
 			"Displays a live RTSP camera feed; ESC or q quits. Space saves a\n"+
 			"screenshot to ~/Pictures and copies it to the clipboard. t turns\n"+
-			"object detection on or off for the camera, and n its notifications.\n\n"+
+			"object detection on or off, and n its notifications. These and\n"+
+			"the space kept for detection images are set in settings.json.\n\n"+
 			"With a camera name, peep connects to that saved camera, asking\n"+
 			"for its password unless one is saved; an unknown name starts a\n"+
 			"wizard to add it. Without one, it lists the saved cameras.\n\n")

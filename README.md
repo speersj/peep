@@ -77,8 +77,8 @@ Cameras are saved under a name you choose, such as `frontdoor`.
     it connects straight away.
   - Otherwise peep asks for the password, then offers to remember it.
   - If there is no camera called `frontdoor`, a short wizard adds one under
-    that name. It asks for the host, stream path, whether to turn on
-    [detection](#detection), and optionally a username and password.
+    that name. It asks for the host, stream path, and optionally a username
+    and password.
 - **`peep`** with no name lists the saved cameras, newest first, along with
   an option to add a new one.
 
@@ -87,7 +87,6 @@ Cameras are saved under a name you choose, such as `frontdoor`.
 | ↑ / ↓, j / k  | move                              |
 | enter         | connect                           |
 | e             | edit the selected camera          |
-| t             | toggle detection for the camera   |
 | d             | forget the selected camera        |
 | q / esc       | quit                              |
 
@@ -122,8 +121,8 @@ shows which decoder is in use.
 | -------------- | --------------------------------------------------------- |
 | esc, q         | quit                                                      |
 | space          | save a screenshot, copy it to the clipboard and notify    |
-| t              | turn detection on or off for this camera (saved)          |
-| n              | turn detection notifications off or on (saved)           |
+| t              | turn detection on or off (saved)                          |
+| n              | turn detection notifications off or on (saved)            |
 
 Keys follow your keyboard layout, so a Caps Lock remapped to Escape (for
 example with XKB's `caps:escape`) also quits.
@@ -143,11 +142,9 @@ window rules.
 
 ## Detection
 
-Detection is a per-camera setting. The wizard asks whether to turn it on when
-you add or edit a camera, `t` in the camera list toggles it for the selected
-camera, and `t` in the video window turns it on or off while you watch. Cameras
-with detection on are marked "detection" in the list, with "(notifications
-off)" if you have turned those off.
+Detection is off at first. Press `t` in the video window to turn it on or
+off, or set it in the [settings file](#settings). The choice applies to every
+camera and is remembered.
 
 With detection on, peep looks for people, vehicles (bicycles, cars, motorcycles,
 buses and trucks) and animals (birds, cats, dogs, horses, sheep, cows and
@@ -161,11 +158,13 @@ thumbnail, and clicking it opens the full frame with the detections outlined.
 The frames are saved in `~/.cache/peep/detections`. While peep runs, it
 checks that folder at startup and every 10 minutes. It deletes frames older
 than a week, and if the folder still holds more than 1 GB, it deletes the
-oldest 10% of frames until it is under that limit.
+oldest 10% of frames until it is under that limit, which can be changed in
+the [settings file](#settings).
 
 Press `n` in the video window to stop the notifications while still saving
-the frames, and again to bring them back. This is saved for the camera, and
-"notifications off" shows in the top right corner while they are off.
+the frames, and again to bring them back. This is remembered for every
+camera, and "notifications off" shows in the top right corner while they are
+off.
 Screenshot notifications are not affected.
 
 To avoid repeated or false alerts:
@@ -187,6 +186,36 @@ fixed SHA-256, and kept in `~/.cache/peep/models`.
 
 Small or distant objects and night-time infrared footage are detected less
 reliably.
+
+## Settings
+
+Settings that apply to every camera are kept in `~/.config/peep/settings.json`
+(or the platform's equivalent config directory), which peep creates the first
+time it runs. You can edit it with any text editor:
+
+```json
+{
+  "detect": false,
+  "quiet": false,
+  "max_detection_storage": "1 GB"
+}
+```
+
+| Setting                 | Default  | Description                                                          |
+| ----------------------- | -------- | -------------------------------------------------------------------- |
+| `detect`                | `false`  | [Detection](#detection) on; `t` in the video window changes it.      |
+| `quiet`                 | `false`  | No notifications for detections; `n` in the video window changes it. |
+| `max_detection_storage` | `"1 GB"` | Space kept for saved detection frames.                               |
+
+Sizes can be in KB, MB, GB or TB (powers of 1024), and decimals such as
+`"1.5 GB"` work. A new storage limit applies at peep's next check of the
+folder, without restarting. `detect` and `quiet` are read when peep starts.
+Pressing `t` or `n` rewrites the file. If the file can't be read, peep uses
+the defaults and says why in the terminal.
+
+Older versions of peep kept `detect` and `quiet` for each camera. The first
+time this version runs, it copies them from the most recently used camera
+that had detection on.
 
 ## Saved cameras and passwords
 
