@@ -124,6 +124,13 @@ shows which decoder is in use.
 | t              | turn detection on or off (saved)                          |
 | n              | turn detection notifications off or on (saved)            |
 
+If the connection drops, or the camera stops sending video for 10 seconds
+without closing it, peep keeps the last frame up with "reconnecting..." in
+the top left corner and reconnects. Failed attempts are retried after 2, 4,
+8, … seconds, up to 30. The times the stream was lost and came back are
+printed in the terminal. A camera that fails before showing any video, for
+example because of a wrong password, still ends peep with the error.
+
 Keys follow your keyboard layout, so a Caps Lock remapped to Escape (for
 example with XKB's `caps:escape`) also quits.
 

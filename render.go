@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"image"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -73,6 +74,15 @@ type player struct {
 
 	toast      string // brief message shown over the video
 	toastUntil time.Time
+
+	// restart starts ffmpeg again after the stream is lost, and newSched
+	// makes a scheduler for its frames. restart is nil in tests.
+	restart  func() (*streamer, error)
+	newSched func(release func([]byte)) *scheduler
+	received uint64    // frames received, across reconnections
+	active   time.Time // when a frame last arrived or a connection began
+	attempts int       // reconnection attempts since frames last arrived
+	retryAt  time.Time // earliest time for the next attempt
 
 	renderer *sdl.Renderer
 	yuv      *sdl.Texture // the current frame as decoded, NV12
@@ -163,7 +173,7 @@ func (p *player) loop() error {
 		if quit || err != nil || p.ctx.Err() != nil {
 			return err
 		}
-		if err := p.st.cap.Err(); err != nil {
+		if err := p.checkStream(time.Now()); err != nil {
 			return err
 		}
 		if err := p.update(time.Now()); err != nil {
@@ -177,6 +187,55 @@ func (p *player) loop() error {
 			time.Sleep(noVsyncDelay)
 		}
 	}
+}
+
+const (
+	// stallTimeout is how long the stream may go without a frame before
+	// it is taken as lost. A camera can stop sending without closing the
+	// connection, which would otherwise leave the last frame up forever.
+	stallTimeout = 10 * time.Second
+	// maxRetryWait caps the growing wait between reconnection attempts.
+	maxRetryWait = 30 * time.Second
+)
+
+// checkStream reconnects when ffmpeg has exited or no frame has arrived
+// for stallTimeout, keeping the last frame up meanwhile. Before the first
+// frame, ffmpeg exiting is an error instead, as the camera is probably
+// misconfigured.
+func (p *player) checkStream(now time.Time) error {
+	err := p.st.cap.Err()
+	if p.received == 0 || p.restart == nil {
+		return err
+	}
+	if err == nil && now.Sub(p.active) < stallTimeout {
+		return nil
+	}
+	if now.Before(p.retryAt) {
+		return nil
+	}
+	if p.attempts == 0 {
+		why := fmt.Sprintf("no video for %s", stallTimeout)
+		if err != nil {
+			why, _, _ = strings.Cut(err.Error(), "\n") // without ffmpeg's log
+		}
+		fmt.Fprintf(os.Stderr, "peep: %s: stream lost (%s), reconnecting\n", now.Format(time.TimeOnly), why)
+	}
+	p.attempts++
+	p.retryAt = now.Add(min(time.Second<<min(p.attempts, 5), maxRetryWait))
+	p.active = now
+
+	old := p.st
+	p.sched.flush()
+	go old.stop() // waits for ffmpeg to exit
+	st, err := p.restart()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "peep: reconnecting: %v\n", err)
+		return nil // old stays in place, failed, until the next attempt
+	}
+	p.st = st
+	p.sched = p.newSched(st.cap.release)
+	p.statsAt = time.Time{}
+	return nil
 }
 
 // handleEvents processes pending window events and reports whether to quit.
@@ -212,6 +271,15 @@ func (p *player) handleEvents() (bool, error) {
 func (p *player) update(now time.Time) error {
 	p.pollDetector(now)
 	p.incoming = p.st.cap.take(p.incoming[:0])
+	if len(p.incoming) > 0 {
+		p.received += uint64(len(p.incoming))
+		p.active = now
+		if p.attempts > 0 {
+			fmt.Fprintf(os.Stderr, "peep: %s: reconnected\n", now.Format(time.TimeOnly))
+			p.attempts = 0
+			p.showToast("Reconnected", now)
+		}
+	}
 	for i, f := range p.incoming {
 		p.sched.add(f)
 		p.incoming[i] = nil
@@ -279,7 +347,11 @@ func (p *player) draw() error {
 			p.drawDetections(p.det.current(time.Now()))
 		}
 	}
-	p.drawToast(time.Now())
+	if p.attempts > 0 {
+		p.drawBadge("reconnecting...", false)
+	} else {
+		p.drawToast(time.Now())
+	}
 	if p.quiet {
 		p.drawBadge("notifications off", true)
 	}
@@ -497,14 +569,14 @@ func (p *player) readFrame() (*image.RGBA, error) {
 
 func (p *player) printStats(now time.Time) {
 	if p.statsAt.IsZero() {
-		p.statsAt = now
+		p.statsAt, p.statsRecv, p.statsShown, p.statsLoops = now, p.received, p.sched.shown, p.loops
 		return
 	}
 	elapsed := now.Sub(p.statsAt).Seconds()
 	if elapsed < 1 {
 		return
 	}
-	recv := p.st.cap.Received()
+	recv := p.received
 	s := p.sched
 	detect := ""
 	if p.det != nil {

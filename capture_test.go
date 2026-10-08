@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"os/exec"
 	"path/filepath"
 	"slices"
@@ -176,5 +177,72 @@ func TestStartDecodingFallsBack(t *testing.T) {
 	}
 	if st.cap.Received() == 0 {
 		t.Fatal("no frames from the fallback")
+	}
+}
+
+func TestReconnect(t *testing.T) {
+	fake := func() *streamer {
+		done := make(chan struct{})
+		close(done)
+		return &streamer{cap: newCapture(16, 4), cancel: func() {}, done: done}
+	}
+	var started []*streamer
+	p := &player{
+		st:       fake(),
+		hasFrame: true, // no preview upload, which needs a renderer
+		restart: func() (*streamer, error) {
+			st := fake()
+			started = append(started, st)
+			return st, nil
+		},
+		newSched: func(release func([]byte)) *scheduler { return newScheduler(time.Second, 20, 8, release) },
+	}
+	p.sched = p.newSched(p.st.cap.release)
+	start := time.Now()
+	at := func(s float64) time.Time { return start.Add(time.Duration(s * float64(time.Second))) }
+	arrive := func(s float64) {
+		p.st.cap.push(&frame{buf: make([]byte, 16), arrival: at(s)})
+		if err := p.update(at(s)); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Before the first frame, ffmpeg failing is an error.
+	p.st.cap.setErr(errors.New("401 Unauthorized"))
+	if err := p.checkStream(at(0)); err == nil {
+		t.Fatal("failure before the first frame was not an error")
+	}
+	p.st = fake()
+	p.sched = p.newSched(p.st.cap.release)
+
+	arrive(0)
+	if p.checkStream(at(9)); len(started) != 0 {
+		t.Fatal("reconnected before stallTimeout")
+	}
+	// The camera stops sending without closing the connection.
+	if p.checkStream(at(10)); len(started) != 1 || p.st != started[0] || p.attempts != 1 {
+		t.Fatalf("stall: %d restarts, attempts %d; want a reconnection", len(started), p.attempts)
+	}
+	// The new connection fails at once; the next try waits 2s.
+	p.st.cap.setErr(errors.New("connection refused"))
+	if p.checkStream(at(11)); len(started) != 1 {
+		t.Fatal("retried too soon")
+	}
+	if p.checkStream(at(12)); len(started) != 2 || p.attempts != 2 {
+		t.Fatalf("%d restarts, attempts %d; want a second attempt", len(started), p.attempts)
+	}
+	// This one connects but sends nothing: given stallTimeout, then 4s.
+	if p.checkStream(at(21)); len(started) != 2 {
+		t.Fatal("gave up on a connection before stallTimeout")
+	}
+	if p.checkStream(at(22)); len(started) != 3 || p.attempts != 3 {
+		t.Fatalf("%d restarts, attempts %d; want a third attempt", len(started), p.attempts)
+	}
+	arrive(23)
+	if p.attempts != 0 || p.toast != "Reconnected" {
+		t.Fatalf("attempts %d, toast %q after frames arrived; want reconnected", p.attempts, p.toast)
+	}
+	if p.checkStream(at(32)); len(started) != 3 {
+		t.Fatal("reconnected a working stream")
 	}
 }

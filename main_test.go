@@ -206,9 +206,9 @@ func TestPlanGeom(t *testing.T) {
 		w, h int
 		want frameGeom
 	}{
-		{2560, 1440, frameGeom{2560, 1440, 2560, 1440, "scale=out_range=tv"}},
+		{2560, 1440, frameGeom{2560, 1440, 2560, 1440, "scale=2560:1440:out_range=tv"}},
 		{8192, 4320, frameGeom{4096, 2160, 4096, 2160, "scale=4096:2160:out_range=tv"}},
-		{642, 361, frameGeom{642, 361, 644, 362, "scale=out_range=tv,pad=644:362"}},
+		{642, 361, frameGeom{642, 361, 644, 362, "scale=642:361:out_range=tv,pad=644:362"}},
 	}
 	for _, tt := range tests {
 		got := planGeom(tt.w, tt.h, 4096)

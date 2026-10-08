@@ -366,7 +366,14 @@ func run(cfg config) error {
 		camera:     cfg.camera,
 		quiet:      cfg.quiet,
 		matrix:     streamMatrix(info.colorSpace),
+		restart: func() (*streamer, error) {
+			return startCapture(ctx, input, dec, geom.frameLen(), pool, ffmpegLog)
+		},
+		newSched: func(release func([]byte)) *scheduler {
+			return newScheduler(cfg.buffer, fps, pool-2, release)
+		},
 	}
+	defer func() { p.st.stop() }() // the latest, after reconnecting
 	defer p.destroy()
 	if err := p.newRenderer(window); err != nil {
 		return err
@@ -405,11 +412,12 @@ func (g frameGeom) vaapiFilter() string {
 func planGeom(w, h, maxDim int) frameGeom {
 	cw, ch, scale := captureSize(w, h, maxDim)
 	g := frameGeom{width: cw, height: ch, padW: (cw + 3) &^ 3, padH: (ch + 1) &^ 1}
+	// The size is always given, so frames keep it even if the camera
+	// comes back at another resolution after a reconnection.
 	if scale == "" {
-		g.filter = "scale=out_range=tv"
-	} else {
-		g.filter = scale + ":out_range=tv"
+		scale = fmt.Sprintf("scale=%d:%d", cw, ch)
 	}
+	g.filter = scale + ":out_range=tv"
 	if g.padW != cw || g.padH != ch {
 		g.filter += fmt.Sprintf(",pad=%d:%d", g.padW, g.padH)
 	}
